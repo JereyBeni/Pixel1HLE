@@ -1,8 +1,7 @@
 //! Display surface + Glow / Glutin + egui state machine
-//! Locked 1920×1080 sailfish canvas with full UI lifecycle.
 
 use crate::error::{Pixel1Error, Result};
-use crate::ui::{self, AppPicker, BootAnimation, EmulatorState, LoadingScreen, SharedUi};
+use crate::ui::{AppPicker, BootAnimation, EmulatorState, LoadingScreen, SharedUi};
 use glow::HasContext;
 use log::{info, warn};
 use once_cell::sync::OnceCell;
@@ -85,7 +84,7 @@ unsafe fn create_glow_context(width: u32, height: u32) -> Result<glow::Context> 
     use glutin::context::{ContextApi, ContextAttributesBuilder, Version};
     use glutin::display::{GetGlDisplay, GlDisplay};
     use glutin::prelude::*;
-    use glutin_winit::DisplayBuilder;
+    use glutin_winit::{DisplayBuilder, GlWindow};
     use raw_window_handle::HasWindowHandle;
     use winit::dpi::PhysicalSize;
     use winit::event_loop::EventLoop;
@@ -127,7 +126,7 @@ unsafe fn create_glow_context(width: u32, height: u32) -> Result<glow::Context> 
         .create_context(&gl_config, &context_attribs)
         .map_err(|e| Pixel1Error::Display(format!("create_context: {e}")))?;
 
-    let attrs = window.build_surface_attributes(Default::default())
+    let attrs = GlWindow::build_surface_attributes(&window, Default::default())
         .map_err(|e| Pixel1Error::Display(format!("surface attrs: {e}")))?;
     let surface = gl_display.create_window_surface(&gl_config, &attrs)
         .map_err(|e| Pixel1Error::Display(format!("create_surface: {e}")))?;
@@ -152,7 +151,7 @@ pub fn run_ui_loop(ui_shared: SharedUi, width: u32, height: u32) -> Result<()> {
     use glutin::display::{GetGlDisplay, GlDisplay};
     use glutin::prelude::*;
     use glutin::surface::SwapInterval;
-    use glutin_winit::DisplayBuilder;
+    use glutin_winit::{DisplayBuilder, GlWindow};
     use raw_window_handle::HasWindowHandle;
     use winit::dpi::PhysicalSize;
     use winit::event::{Event, WindowEvent};
@@ -189,7 +188,7 @@ pub fn run_ui_loop(ui_shared: SharedUi, width: u32, height: u32) -> Result<()> {
 
     let not_current = gl_display.create_context(&gl_config, &context_attribs)
         .map_err(|e| Pixel1Error::Display(format!("{e}")))?;
-    let attrs = window.build_surface_attributes(Default::default())
+    let attrs = GlWindow::build_surface_attributes(&window, Default::default())
         .map_err(|e| Pixel1Error::Display(format!("{e}")))?;
     let surface = gl_display.create_window_surface(&gl_config, &attrs)
         .map_err(|e| Pixel1Error::Display(format!("{e}")))?;
@@ -206,7 +205,19 @@ pub fn run_ui_loop(ui_shared: SharedUi, width: u32, height: u32) -> Result<()> {
     let gl = Arc::new(Mutex::new(gl));
     let _ = GL_CONTEXT.set(gl.clone());
 
-    let mut egui_glow = egui_glow::EguiGlow::new(&event_loop, gl.lock().clone(), None, None, false);
+    // egui_glow 0.29 API: EguiGlow::new takes (&EventLoop, glow::Context, ...)
+    let gl_for_egui = {
+        let guard = gl.lock();
+        // We need a clone of the Context. glow::Context is not Clone by default
+        // in all versions; create a second loader-based context sharing the same display.
+        unsafe {
+            glow::Context::from_loader_function(|s| {
+                gl_display.get_proc_address(&std::ffi::CString::new(s).unwrap()) as *const _
+            })
+        }
+    };
+
+    let mut egui_glow = egui_glow::EguiGlow::new(&event_loop, gl_for_egui, None, None, false);
     let mut egui_winit = egui_winit::State::new(
         egui_glow.egui_ctx.clone(),
         egui::ViewportId::ROOT,
@@ -225,6 +236,7 @@ pub fn run_ui_loop(ui_shared: SharedUi, width: u32, height: u32) -> Result<()> {
         info!(target: "hle::display", "Found {} APK(s)", g.available_apks.len());
     }
 
+    #[allow(deprecated)]
     event_loop.run(move |event, elwt| {
         elwt.set_control_flow(ControlFlow::Poll);
 
@@ -270,11 +282,9 @@ pub fn run_ui_loop(ui_shared: SharedUi, width: u32, height: u32) -> Result<()> {
                         }
 
                         match state {
-                            EmulatorState::GameRunning { .. } => {
-                                // pure game surface
-                            }
+                            EmulatorState::GameRunning { .. } => {}
                             _ => {
-                                let raw_input = egui_winit.take_egui_input(&window);
+                                let _raw_input = egui_winit.take_egui_input(&window);
                                 let full_output = egui_glow.run(elwt, |ctx| {
                                     match &ui_shared.lock().state {
                                         EmulatorState::AppPicker => AppPicker::ui(ctx, &ui_shared),
@@ -309,7 +319,6 @@ pub fn run_ui_loop(ui_shared: SharedUi, width: u32, height: u32) -> Result<()> {
 
 fn scan_apks() -> Vec<crate::ui::ApkEntry> {
     let mut list = Vec::new();
-    // Support both the release layout (apps/) and the old locations
     for dir in [".", "apps", "apks"] {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for e in entries.flatten() {

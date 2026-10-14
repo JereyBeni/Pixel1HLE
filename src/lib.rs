@@ -55,13 +55,11 @@ impl Pixel1Translator {
         Ok(Self { cpu, binder, syscall, hw })
     }
 
-    /// Launch the full interactive UI (blocks on the event loop)
     pub fn run_ui(self) -> Result<()> {
         let width = self.hw.profile.display.width;
         let height = self.hw.profile.display.height;
         let ui_shared = self.hw.ui_shared.clone();
 
-        // Spawn a background watcher that reacts to APK selection
         let ui_clone = ui_shared.clone();
         let cpu_clone = self.cpu.clone();
         std::thread::spawn(move || {
@@ -84,7 +82,6 @@ impl Pixel1Translator {
                 if should_load {
                     info!(target: "hle::display", "Background loader starting for {name}");
                     let executor = ApkElfExecutor::new(&path).with_ui(ui_clone.clone());
-                    // Try common engine names
                     let candidates = ["libunity.so", "libminecraftpe.so", "libmain.so", "libgame.so"];
                     let mut loaded = false;
                     for eng in candidates {
@@ -92,7 +89,7 @@ impl Pixel1Translator {
                             Ok(lib) => {
                                 info!(target: "hle::linker", "Loaded {eng} @ 0x{:x}", lib.guest_base);
                                 cpu_clone.attach_linker(executor);
-                                DisplaySurface::set_state(
+                                hardware::display::DisplaySurface::set_state(
                                     &ui_clone,
                                     EmulatorState::GameRunning { apk_name: name },
                                 );
@@ -105,15 +102,16 @@ impl Pixel1Translator {
                         }
                     }
                     if !loaded {
-                        // Even if no engine .so found, still transition so UI doesn't hang
-                        DisplaySurface::update_loading_progress(&ui_clone, 1.0, "No native engine found – demo mode");
+                        hardware::display::DisplaySurface::update_loading_progress(
+                            &ui_clone, 1.0, "No native engine found – demo mode",
+                        );
                         std::thread::sleep(std::time::Duration::from_millis(800));
-                        DisplaySurface::set_state(
+                        hardware::display::DisplaySurface::set_state(
                             &ui_clone,
                             EmulatorState::GameRunning { apk_name: name },
                         );
                     }
-                    break; // one-shot for now
+                    break;
                 }
             }
         });
@@ -136,6 +134,3 @@ impl Pixel1Translator {
         self.binder.get_system_service("WINDOW_SERVICE")
     }
 }
-
-// Re-export for the background thread
-use crate::hardware::display::DisplaySurface;

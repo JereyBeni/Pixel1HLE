@@ -1,16 +1,15 @@
 //! Complete Hardware / Software Stack for sailfish
 //! Display + UI state machine, Touch, Audio, Storage, Battery + GLES HLE
 
-mod audio;
-mod battery;
-mod display;
-mod gles_bridge;
-mod storage;
+pub mod audio;
+pub mod battery;
+pub mod display;
+pub mod gles_bridge;
+pub mod storage;
 
 pub use audio::AudioPipeline;
 pub use battery::BatteryMock;
-pub use display::{self, DisplaySurface};
-pub use gles_bridge;
+pub use display::DisplaySurface;
 pub use storage::SparseStorage;
 
 use crate::error::Result;
