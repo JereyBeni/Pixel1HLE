@@ -16,10 +16,12 @@ thiserror = "1.0"
 log = "0.4"
 env_logger = "0.11"
 
-# Window / GL (display + touch)
+# Window / GL (display + touch + GLES HLE)
 winit = "0.30"
 glutin = "0.32"
+glutin-winit = "0.5"
 raw-window-handle = "0.6"
+glow = "0.14"
 
 # Audio (software pipeline)
 cpal = "0.15"
@@ -33,6 +35,7 @@ once_cell = "1.19"
 parking_lot = "0.12"
 bitflags = "2.6"
 bytemuck = { version = "1.16", features = ["derive"] }
+lazy_static = "1.5"
 
 [profile.release]
 lto = true

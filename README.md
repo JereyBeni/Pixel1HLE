@@ -2,46 +2,45 @@
 
 **High-Level Emulation (HLE) compatibility layer** for Android 7.1 apps compiled for the Google Pixel 1 (`sailfish`).
 
-Runs ARM64 native code + Android framework calls **natively on the host** without a full VM / hypervisor.
+Now includes a full **OpenGL ES → Desktop GL** translation bridge aimed at Unity (`libunity.so`) and similar native engines.
 
 ## Architecture
 
 ```
-Android App (ARM64 .so + ART/Java)
+Android App / libunity.so (ARM64)
          │
          ▼
 ┌─────────────────────────────────────────────┐
 │  BinderRuntime                              │
-│  - getSystemService() trap                  │
-│  - deny-by-default + manifest check         │
-│  - lazy service spin-up                     │
 └────────────────────┬────────────────────────┘
                      │
                      ▼
 ┌─────────────────────────────────────────────┐
-│  HardwareStack (profile-driven)             │
-│  - Display 1920×1080 @ 60 Hz                │
-│  - Multi-touch injection                    │
-│  - Audio pipeline                           │
-│  - Sparse 32 GB storage                     │
-│  - Battery permanently 100 % + charging     │
-│  - hasSystemFeature() → false for absent HW │
+│  HardwareStack + GLES Bridge                │
+│  extern "C" egl* / gl*  →  glow::Context    │
+│  (glutin Core GL 4.5, 1920×1080@60)         │
 └────────────────────┬────────────────────────┘
                      │
                      ▼
 ┌─────────────────────────────────────────────┐
-│  SyscallTranslator (Linux 3.18 → host)      │
-│  - epoll / futex / mmap / openat …          │
+│  SyscallTranslator                          │
 └────────────────────┬────────────────────────┘
                      │
                      ▼
 ┌─────────────────────────────────────────────┐
-│  CpuRuntime                                 │
-│  - ELF loader (object + memmap2)            │
-│  - Guest → host address mapping             │
-│  - JNI native method hook tables            │
+│  CpuRuntime (ELF + JNI + Unity bootstrap)   │
 └─────────────────────────────────────────────┘
 ```
+
+## GLES / EGL symbols exported
+
+`eglGetDisplay`, `eglInitialize`, `eglChooseConfig`, `eglCreateWindowSurface`,
+`eglCreateContext`, `eglMakeCurrent`, `eglSwapBuffers`, `eglGetError`, …
+
+`glViewport`, `glClear`, `glClearColor`, `glGenBuffers`, `glBindBuffer`,
+`glBufferData`, `glDrawElements`, `glEnable`, `glDisable`, `glGetString`, …
+
+All of them are real `extern "C"` entry points that forward into a single global `glow::Context`.
 
 ## Quick start
 
@@ -49,12 +48,27 @@ Android App (ARM64 .so + ART/Java)
 cargo run --release
 ```
 
+You will see the full Unity-style cascade:
+
+```
+eglGetDisplay → fake display
+eglInitialize
+eglChooseConfig
+eglCreateWindowSurface → 1920x1080 sailfish surface
+eglMakeCurrent
+glViewport(0, 0, 1920, 1080)
+glClearColor(...)
+glClear(...)
+glGenBuffers / glBindBuffer / glBufferData
+```
+
 ## Profile
 
-Everything is driven by `config/pixel1-sailfish.yaml`.  
-If a component is marked `present: false`, any `hasSystemFeature()` or `getSystemService()` for it returns `false` / `null` instantly.
+Everything is driven by `config/pixel1-sailfish.yaml`.
 
 ## Status
 
-Architectural skeleton + full cascade demo.  
-Next milestones: real winit/glutin window, cpal audio, proper Binder parcel marshalling, bionic linker emulation.
+- ✅ GLES/EGL HLE bridge (no todo!() in render path)
+- ✅ Global glow context reachable from guest code
+- ✅ Unity bootstrap demo that exercises the whole pipeline
+- Next: real frame loop + swap, texture upload path, more GLES 3.x entry points

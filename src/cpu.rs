@@ -18,10 +18,9 @@ pub struct GuestMapping {
     pub guest_base: u64,
     pub host_ptr: *mut u8,
     pub size: usize,
-    pub prot: u32, // PROT_READ | PROT_WRITE | PROT_EXEC
+    pub prot: u32,
 }
 
-// Safety: we own the mapping lifetime via the Mmap
 unsafe impl Send for GuestMapping {}
 unsafe impl Sync for GuestMapping {}
 
@@ -31,15 +30,13 @@ pub struct JniHook {
     pub class: String,
     pub method: String,
     pub signature: String,
-    pub host_fn: usize, // function pointer as usize
+    pub host_fn: usize,
 }
 
 /// Core CPU / loader state
 pub struct CpuRuntime {
     mappings: RwLock<Vec<GuestMapping>>,
-    /// guest_va → host_fn
     jni_hooks: RwLock<HashMap<u64, JniHook>>,
-    /// loaded libraries (soname → base)
     loaded_libs: RwLock<HashMap<String, u64>>,
     next_guest_base: RwLock<u64>,
 }
@@ -50,12 +47,10 @@ impl CpuRuntime {
             mappings: RwLock::new(Vec::new()),
             jni_hooks: RwLock::new(HashMap::new()),
             loaded_libs: RwLock::new(HashMap::new()),
-            // start guest mappings at a high canonical address to avoid host collisions
             next_guest_base: RwLock::new(0x7f00_0000_0000),
         }
     }
 
-    /// Load an ARM64 ELF .so from the APK filesystem into the guest address space
     pub fn load_elf(&self, path: &Path, soname: &str) -> Result<u64> {
         info!("CPU: loading ELF {} as {}", path.display(), soname);
 
@@ -70,7 +65,6 @@ impl CpuRuntime {
         }
 
         let mut guest_base = *self.next_guest_base.read();
-        // align to 64 KiB
         guest_base = (guest_base + 0xffff) & !0xffff;
 
         let mut total_size = 0usize;
@@ -80,7 +74,6 @@ impl CpuRuntime {
             }
         }
 
-        // allocate host memory that will back the guest mapping
         let mut host_buf = vec![0u8; total_size];
         for section in obj.sections() {
             if let Ok(data) = section.data() {
@@ -92,14 +85,13 @@ impl CpuRuntime {
         }
 
         let host_ptr = host_buf.as_mut_ptr();
-        // leak the vec so the mapping lives for the process lifetime (HLE style)
         std::mem::forget(host_buf);
 
         let mapping = GuestMapping {
             guest_base,
             host_ptr,
             size: total_size,
-            prot: 0x7, // RWX for simplicity in HLE (real would use mprotect)
+            prot: 0x7,
         };
 
         self.mappings.write().push(mapping);
@@ -110,7 +102,6 @@ impl CpuRuntime {
         Ok(guest_base)
     }
 
-    /// Register a JNI native method so the guest can call into host code
     pub fn register_jni_hook(
         &self,
         guest_va: u64,
@@ -129,7 +120,6 @@ impl CpuRuntime {
         self.jni_hooks.write().insert(guest_va, hook);
     }
 
-    /// Resolve a guest virtual address to a host pointer (for call interception)
     pub fn resolve_guest_va(&self, guest_va: u64) -> Option<*mut u8> {
         let mappings = self.mappings.read();
         for m in mappings.iter() {
@@ -141,13 +131,77 @@ impl CpuRuntime {
         None
     }
 
-    /// Lookup a registered JNI hook by guest VA
     pub fn lookup_jni_hook(&self, guest_va: u64) -> Option<JniHook> {
         self.jni_hooks.read().get(&guest_va).cloned()
     }
 
     pub fn get_lib_base(&self, soname: &str) -> Option<u64> {
         self.loaded_libs.read().get(soname).copied()
+    }
+
+    /// Demo: simulate the exact early graphics calls that libunity.so issues
+    /// after it has obtained an EGL surface. This exercises the whole
+    /// extern "C" → glow path without needing a real .so.
+    pub fn demo_unity_graphics_bootstrap(&self) {
+        info!(target: "hle::gles", "CPU: simulating Unity graphics bootstrap cascade");
+
+        // 1. EGL init sequence (exactly the order Unity uses)
+        unsafe {
+            let display = crate::hardware::gles_bridge::eglGetDisplay(std::ptr::null_mut());
+            let mut major = 0;
+            let mut minor = 0;
+            crate::hardware::gles_bridge::eglInitialize(display, &mut major, &mut minor);
+
+            let mut config: crate::hardware::gles_bridge::EGLConfig = std::ptr::null_mut();
+            let mut num = 0;
+            crate::hardware::gles_bridge::eglChooseConfig(
+                display,
+                std::ptr::null(),
+                &mut config,
+                1,
+                &mut num,
+            );
+
+            let surface = crate::hardware::gles_bridge::eglCreateWindowSurface(
+                display,
+                config,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            );
+
+            let ctx = crate::hardware::gles_bridge::eglCreateContext(
+                display,
+                config,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            );
+
+            crate::hardware::gles_bridge::eglMakeCurrent(display, surface, surface, ctx);
+        }
+
+        // 2. First real GL commands Unity issues (viewport + clear)
+        unsafe {
+            crate::hardware::gles_bridge::glViewport(0, 0, 1920, 1080);
+            crate::hardware::gles_bridge::glClearColor(0.1, 0.2, 0.3, 1.0);
+            crate::hardware::gles_bridge::glClear(0x00004000 | 0x00000100); // COLOR | DEPTH
+        }
+
+        // 3. Tiny buffer test (Unity always creates a few VBOs early)
+        unsafe {
+            let mut buf = 0u32;
+            crate::hardware::gles_bridge::glGenBuffers(1, &mut buf);
+            crate::hardware::gles_bridge::glBindBuffer(0x8892, buf); // GL_ARRAY_BUFFER
+            // dummy 16-byte matrix-ish payload
+            let dummy: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+            crate::hardware::gles_bridge::glBufferData(
+                0x8892,
+                16,
+                dummy.as_ptr() as *const _,
+                0x88E4, // GL_STATIC_DRAW
+            );
+        }
+
+        info!(target: "hle::gles", "CPU: Unity bootstrap cascade completed – no faults");
     }
 }
 

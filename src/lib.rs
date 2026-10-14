@@ -2,24 +2,27 @@
 //!
 //! Architecture cascade (guest → host):
 //!
-//!   Android App (ARM64 .so + Java)
+//!   Android App / libunity.so (ARM64)
 //!        │
 //!        ▼
 //!   ┌─────────────────────────────────────────────┐
-//!   │  BinderRuntime  (getSystemService, transact)│
-//!   │         │                                    │
-//!   │         ▼                                    │
-//!   │  HardwareStack  (hasSystemFeature, mocks)   │
-//!   └─────────────────────────────────────────────┘
-//!        │
-//!        ▼
+//!   │  BinderRuntime  (getSystemService …)        │
+//!   └────────────────────┬────────────────────────┘
+//!                        │
+//!                        ▼
 //!   ┌─────────────────────────────────────────────┐
-//!   │  SyscallTranslator  (bionic → host POSIX)   │
-//!   └─────────────────────────────────────────────┘
-//!        │
-//!        ▼
+//!   │  HardwareStack + GLES Bridge                │
+//!   │  (egl* / gl* extern "C" → glow::Context)    │
+//!   └────────────────────┬────────────────────────┘
+//!                        │
+//!                        ▼
 //!   ┌─────────────────────────────────────────────┐
-//!   │  CpuRuntime  (ELF loader + JNI hooks)       │
+//!   │  SyscallTranslator  (bionic → host)         │
+//!   └────────────────────┬────────────────────────┘
+//!                        │
+//!                        ▼
+//!   ┌─────────────────────────────────────────────┐
+//!   │  CpuRuntime  (ELF + JNI hooks)              │
 //!   └─────────────────────────────────────────────┘
 
 pub mod binder;
@@ -47,9 +50,8 @@ pub struct Pixel1Translator {
 
 impl Pixel1Translator {
     pub fn new(profile_path: &str) -> Result<Self> {
-        info!("Pixel1Translator: booting sailfish HLE");
+        info!("Pixel1Translator: booting sailfish HLE + GLES bridge");
 
-        // Load profile
         let profile_str = std::fs::read_to_string(profile_path)
             .map_err(|e| Pixel1Error::Config(e.to_string()))?;
         let profile: hardware::HardwareProfile = serde_yaml::from_str(&profile_str)
@@ -62,7 +64,10 @@ impl Pixel1Translator {
         let cpu = Arc::new(CpuRuntime::new());
         let syscall = Arc::new(SyscallTranslator::new());
 
-        // allowlist from the yaml (simplified – real code would parse the full document)
+        // Register the GLES/EGL symbols so any future ELF load of libGLESv2.so
+        // can be redirected straight into our extern "C" table.
+        hardware::gles_bridge::register_gles_symbols(&cpu);
+
         let allowlist = vec![
             "android.permission.INTERNET".into(),
             "android.permission.ACCESS_NETWORK_STATE".into(),
@@ -80,17 +85,12 @@ impl Pixel1Translator {
         })
     }
 
-    /// Example of a full cascade: app calls getSystemService("WINDOW_SERVICE")
+    /// Full Unity-style graphics bootstrap demonstration
+    pub fn demo_unity_graphics(&self) {
+        self.cpu.demo_unity_graphics_bootstrap();
+    }
+
     pub fn example_cascade_get_window_service(&self) -> Result<Option<u32>> {
-        // 1. Binder layer
-        let handle = self.binder.get_system_service("WINDOW_SERVICE")?;
-
-        // 2. If we got a handle, any subsequent transact() would go through Binder
-        //    and eventually touch the DisplaySurface inside HardwareStack.
-
-        // 3. If the app later does a syscall (e.g. mmap for a graphic buffer),
-        //    it hits SyscallTranslator which may talk back to CpuRuntime.
-
-        Ok(handle)
+        self.binder.get_system_service("WINDOW_SERVICE")
     }
 }

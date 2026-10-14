@@ -1,14 +1,16 @@
 //! Complete Hardware / Software Stack for sailfish
-//! Display, Touch, Audio, Storage, Battery – all driven from the profile.
+//! Display, Touch, Audio, Storage, Battery + GLES HLE bridge
 
 mod audio;
 mod battery;
 mod display;
+mod gles_bridge;
 mod storage;
 
 pub use audio::AudioPipeline;
 pub use battery::BatteryMock;
 pub use display::DisplaySurface;
+pub use gles_bridge; // re-export the whole module so symbols stay visible
 pub use storage::SparseStorage;
 
 use crate::error::Result;
@@ -84,7 +86,7 @@ pub struct HardwareStack {
 
 impl HardwareStack {
     pub fn from_profile(profile: HardwareProfile) -> Result<Arc<Self>> {
-        info!("Hardware: building sailfish stack");
+        info!("Hardware: building sailfish stack (with GLES HLE)");
 
         let storage = SparseStorage::new(profile.storage.internal_gb)?;
         let battery = BatteryMock::new(profile.battery.force_full_and_charging);
@@ -117,7 +119,9 @@ impl HardwareStack {
             "android.hardware.audio.output" => self.profile.audio.present,
             "android.hardware.screen.landscape"
             | "android.hardware.screen.portrait" => self.profile.display.present,
-            _ => false, // deny-by-default for unknown features
+            "android.hardware.opengles.aep"
+            | "android.software.opengles.deqp.level" => true, // we always claim GLES
+            _ => false,
         }
     }
 

@@ -29,6 +29,9 @@ pub enum Pixel1Error {
     #[error("Display / window error: {0}")]
     Display(String),
 
+    #[error("GLES / EGL error: {0}")]
+    Gles(String),
+
     #[error("Audio pipeline error: {0}")]
     Audio(String),
 
