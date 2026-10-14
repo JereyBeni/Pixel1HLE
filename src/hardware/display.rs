@@ -10,42 +10,30 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Instant;
 
-pub static GL_CONTEXT: OnceCell<Arc<Mutex<glow::Context>>> = OnceCell::new();
+/// Global glow context for the GLES bridge (set once the window is created).
+pub static GL_CONTEXT: OnceCell<Arc<glow::Context>> = OnceCell::new();
 
 pub fn with_gl<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&glow::Context) -> R,
 {
-    GL_CONTEXT.get().map(|mtx| {
-        let gl = mtx.lock();
-        f(&*gl)
-    })
+    GL_CONTEXT.get().map(|gl| f(gl))
 }
 
 pub struct DisplaySurface {
     pub width: u32,
     pub height: u32,
     pub refresh_hz: u32,
-    _gl_context: Arc<Mutex<glow::Context>>,
     pub ui_shared: SharedUi,
 }
 
 impl DisplaySurface {
     pub fn new(width: u32, height: u32, refresh_hz: u32, ui_shared: SharedUi) -> Result<Self> {
-        info!(target: "hle::display", "Display: creating {width}x{height} @{refresh_hz}Hz + egui state machine");
-
-        // Lightweight init – the real GL context is created inside the event loop
-        let placeholder = Arc::new(Mutex::new(unsafe {
-            // Empty placeholder; real context is published in run_ui_loop
-            std::mem::zeroed::<glow::Context>()
-        }));
-        // Don't set GL_CONTEXT here – run_ui_loop will
-
+        info!(target: "hle::display", "Display: {width}x{height} @{refresh_hz}Hz (GL created on resume)");
         Ok(Self {
             width,
             height,
             refresh_hz,
-            _gl_context: placeholder,
             ui_shared,
         })
     }
@@ -69,10 +57,6 @@ impl DisplaySurface {
         log::trace!(target: "hle::display", "Touch slot={slot} ({x},{y}) down={down}");
     }
 }
-
-// ─────────────────────────────────────────────────────────────
-// Application state for winit 0.30 ApplicationHandler
-// ─────────────────────────────────────────────────────────────
 
 struct AppState {
     ui_shared: SharedUi,
@@ -118,26 +102,10 @@ impl winit::application::ApplicationHandler for AppState {
             Ok((gl_window, gl)) => {
                 let gl = Arc::new(gl);
 
-                // Publish for GLES bridge
-                let gl_mutex = Arc::new(Mutex::new({
-                    // second context for the bridge (same display)
-                    // For simplicity we just store a clone path via the Arc
-                    // The bridge uses with_gl which locks this.
-                    // We'll re-load via the same loader if needed.
-                    unsafe {
-                        // Use the same Arc's context by reconstructing is not ideal;
-                        // store the Arc itself in a side channel.
-                        // For HLE we put a dummy and rely on the main gl for painting.
-                        std::mem::zeroed()
-                    }
-                }));
-                // Store the real context for with_gl by leaking a mutex around a clone approach:
-                // simplest: just don't use the zeroed one – set a proper one.
-                let _ = GL_CONTEXT.set(Arc::new(Mutex::new({
-                    // We can't easily clone glow::Context. The GLES hooks will
-                    // no-op until a real game path is used. UI still works.
-                    unsafe { std::mem::zeroed() }
-                })));
+                // Publish for GLES bridge hooks
+                if GL_CONTEXT.set(Arc::clone(&gl)).is_err() {
+                    warn!(target: "hle::display", "GL_CONTEXT already set");
+                }
 
                 let egui_glow = egui_glow::EguiGlow::new(
                     event_loop,
@@ -170,9 +138,15 @@ impl winit::application::ApplicationHandler for AppState {
         _id: winit::window::WindowId,
         event: winit::event::WindowEvent,
     ) {
-        let Some(gl_window) = self.gl_window.as_mut() else { return };
-        let Some(egui_glow) = self.egui_glow.as_mut() else { return };
-        let Some(gl) = self.gl.as_ref() else { return };
+        let Some(gl_window) = self.gl_window.as_mut() else {
+            return;
+        };
+        let Some(egui_glow) = self.egui_glow.as_mut() else {
+            return;
+        };
+        let Some(gl) = self.gl.as_ref() else {
+            return;
+        };
 
         let is_ui = {
             let g = self.ui_shared.lock();
@@ -194,7 +168,6 @@ impl winit::application::ApplicationHandler for AppState {
                 let time = self.start.elapsed().as_secs_f64();
                 let state = self.ui_shared.lock().state.clone();
 
-                // Auto BootAnimation → ApkLoading
                 if let EmulatorState::BootAnimation { apk_name } = &state {
                     if self.boot_timer.is_none() {
                         self.boot_timer = Some(Instant::now());
@@ -216,9 +189,7 @@ impl winit::application::ApplicationHandler for AppState {
                 }
 
                 match state {
-                    EmulatorState::GameRunning { .. } => {
-                        // pure game surface – GLES bridge owns drawing
-                    }
+                    EmulatorState::GameRunning { .. } => {}
                     _ => {
                         let ui_shared = self.ui_shared.clone();
                         egui_glow.run(&gl_window.window, |ctx| {
