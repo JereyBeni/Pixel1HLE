@@ -1,35 +1,23 @@
-//! pixel1-translator – High-Level Emulation layer for Google Pixel 1 (sailfish)
-//!
-//! Full cascade:
-//!
-//!   APK (lib/arm64-v8a/libunity.so)
-//!        │
-//!        ▼
-//!   ApkElfExecutor  (extract → PT_LOAD map → RELA patch → JNI_OnLoad)
-//!        │
-//!        ▼
-//!   GLES Bridge (extern "C" egl*/gl* → glow)
-//!        │
-//!        ▼
-//!   HardwareStack + Binder + SyscallTranslator
+//! pixel1-translator – Full HLE with UI state machine
 
 pub mod binder;
 pub mod cpu;
 pub mod error;
 pub mod hardware;
 pub mod syscall;
+pub mod ui;
 
 pub use binder::BinderRuntime;
 pub use cpu::{ApkElfExecutor, CpuRuntime, LoadedLibrary};
 pub use error::{Pixel1Error, Result};
 pub use hardware::HardwareStack;
 pub use syscall::SyscallTranslator;
+pub use ui::{EmulatorState, SharedUi};
 
 use log::info;
 use std::path::Path;
 use std::sync::Arc;
 
-/// Top-level runtime that owns every subsystem
 pub struct Pixel1Translator {
     pub cpu: Arc<CpuRuntime>,
     pub binder: Arc<BinderRuntime>,
@@ -39,7 +27,7 @@ pub struct Pixel1Translator {
 
 impl Pixel1Translator {
     pub fn new(profile_path: &str) -> Result<Self> {
-        info!("Pixel1Translator: booting sailfish HLE + GLES + dynamic linker");
+        info!("Pixel1Translator: booting sailfish HLE + UI state machine");
 
         let profile_str = std::fs::read_to_string(profile_path)
             .map_err(|e| Pixel1Error::Config(e.to_string()))?;
@@ -64,40 +52,82 @@ impl Pixel1Translator {
 
         let binder = Arc::new(BinderRuntime::new(hw.clone(), allowlist));
 
-        Ok(Self {
-            cpu,
-            binder,
-            syscall,
-            hw,
-        })
+        Ok(Self { cpu, binder, syscall, hw })
     }
 
-    /// Full APK → native library execution path
-    ///
-    /// 1. Open the APK
-    /// 2. Extract lib/arm64-v8a/<engine>.so
-    /// 3. Map PT_LOAD, apply relocations, hook EGL/GLES symbols
-    /// 4. Call JNI_OnLoad with a mocked JavaVM
+    /// Launch the full interactive UI (blocks on the event loop)
+    pub fn run_ui(self) -> Result<()> {
+        let width = self.hw.profile.display.width;
+        let height = self.hw.profile.display.height;
+        let ui_shared = self.hw.ui_shared.clone();
+
+        // Spawn a background watcher that reacts to APK selection
+        let ui_clone = ui_shared.clone();
+        let cpu_clone = self.cpu.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let (should_load, path, name) = {
+                    let g = ui_clone.lock();
+                    match &g.state {
+                        EmulatorState::ApkLoading { apk_name } => {
+                            if let Some(p) = &g.selected_apk {
+                                (true, p.clone(), apk_name.clone())
+                            } else {
+                                (false, String::new(), String::new())
+                            }
+                        }
+                        _ => (false, String::new(), String::new()),
+                    }
+                };
+
+                if should_load {
+                    info!(target: "hle::display", "Background loader starting for {name}");
+                    let executor = ApkElfExecutor::new(&path).with_ui(ui_clone.clone());
+                    // Try common engine names
+                    let candidates = ["libunity.so", "libminecraftpe.so", "libmain.so", "libgame.so"];
+                    let mut loaded = false;
+                    for eng in candidates {
+                        match executor.bootstrap_engine(eng) {
+                            Ok(lib) => {
+                                info!(target: "hle::linker", "Loaded {eng} @ 0x{:x}", lib.guest_base);
+                                cpu_clone.attach_linker(executor);
+                                DisplaySurface::set_state(
+                                    &ui_clone,
+                                    EmulatorState::GameRunning { apk_name: name },
+                                );
+                                loaded = true;
+                                break;
+                            }
+                            Err(e) => {
+                                log::debug!(target: "hle::linker", "{eng} not found: {e}");
+                            }
+                        }
+                    }
+                    if !loaded {
+                        // Even if no engine .so found, still transition so UI doesn't hang
+                        DisplaySurface::update_loading_progress(&ui_clone, 1.0, "No native engine found – demo mode");
+                        std::thread::sleep(std::time::Duration::from_millis(800));
+                        DisplaySurface::set_state(
+                            &ui_clone,
+                            EmulatorState::GameRunning { apk_name: name },
+                        );
+                    }
+                    break; // one-shot for now
+                }
+            }
+        });
+
+        hardware::display::run_ui_loop(ui_shared, width, height)
+    }
+
     pub fn load_and_run_apk(&self, apk_path: &Path, engine_soname: &str) -> Result<Arc<LoadedLibrary>> {
-        info!(target: "hle::linker", "=== APK execution cascade: {} ===", apk_path.display());
-
-        let executor = ApkElfExecutor::new(apk_path);
-
-        // Discover what is inside
-        let libs = executor.list_native_libs()?;
-        info!(target: "hle::linker", "Native libs: {:?}", libs);
-
-        // Load the engine (libunity.so, libminecraftpe.so, …)
+        let executor = ApkElfExecutor::new(apk_path).with_ui(self.hw.ui_shared.clone());
         let lib = executor.bootstrap_engine(engine_soname)?;
-
-        // Keep the executor alive inside the CPU runtime
         self.cpu.attach_linker(executor);
-
-        info!(target: "hle::linker", "Engine {} is live @ guest 0x{:x}", engine_soname, lib.guest_base);
         Ok(lib)
     }
 
-    /// Convenience demo that only exercises the GLES path (no real APK needed)
     pub fn demo_unity_graphics(&self) {
         self.cpu.demo_unity_graphics_bootstrap();
     }
@@ -106,3 +136,6 @@ impl Pixel1Translator {
         self.binder.get_system_service("WINDOW_SERVICE")
     }
 }
+
+// Re-export for the background thread
+use crate::hardware::display::DisplaySurface;

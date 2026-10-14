@@ -7,8 +7,8 @@ description = "High-Level Emulation (HLE) compatibility layer for Google Pixel 1
 license = "MIT"
 
 [features]
-default = []
-loader = []  # enables full APK/ELF dynamic linker path
+default = ["loader"]
+loader = []
 
 [dependencies]
 # ELF parsing & memory mapping
@@ -23,14 +23,17 @@ thiserror = "1.0"
 log = "0.4"
 env_logger = "0.11"
 
-# Window / GL (display + touch + GLES HLE)
+# Window / GL + UI
 winit = "0.30"
 glutin = "0.32"
 glutin-winit = "0.5"
 raw-window-handle = "0.6"
 glow = "0.14"
+egui = "0.29"
+egui_glow = "0.29"
+egui-winit = "0.29"
 
-# Audio (software pipeline)
+# Audio
 cpal = "0.15"
 
 # Serialization / config

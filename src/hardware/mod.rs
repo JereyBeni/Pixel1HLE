@@ -1,5 +1,5 @@
 //! Complete Hardware / Software Stack for sailfish
-//! Display, Touch, Audio, Storage, Battery + GLES HLE bridge
+//! Display + UI state machine, Touch, Audio, Storage, Battery + GLES HLE
 
 mod audio;
 mod battery;
@@ -9,11 +9,12 @@ mod storage;
 
 pub use audio::AudioPipeline;
 pub use battery::BatteryMock;
-pub use display::DisplaySurface;
-pub use gles_bridge; // re-export the whole module so symbols stay visible
+pub use display::{self, DisplaySurface};
+pub use gles_bridge;
 pub use storage::SparseStorage;
 
 use crate::error::Result;
+use crate::ui::{self, SharedUi};
 use log::info;
 use parking_lot::RwLock;
 use serde::Deserialize;
@@ -75,21 +76,22 @@ pub struct FeatureCfg {
     pub present: bool,
 }
 
-/// Top-level hardware stack that owns every subsystem
 pub struct HardwareStack {
     pub profile: HardwareProfile,
     pub display: RwLock<Option<DisplaySurface>>,
     pub audio: RwLock<Option<AudioPipeline>>,
     pub storage: SparseStorage,
     pub battery: BatteryMock,
+    pub ui_shared: SharedUi,
 }
 
 impl HardwareStack {
     pub fn from_profile(profile: HardwareProfile) -> Result<Arc<Self>> {
-        info!("Hardware: building sailfish stack (with GLES HLE)");
+        info!("Hardware: building sailfish stack (UI + GLES HLE)");
 
         let storage = SparseStorage::new(profile.storage.internal_gb)?;
         let battery = BatteryMock::new(profile.battery.force_full_and_charging);
+        let ui_shared = ui::create_shared_ui();
 
         let stack = Arc::new(Self {
             profile,
@@ -97,12 +99,12 @@ impl HardwareStack {
             audio: RwLock::new(None),
             storage,
             battery,
+            ui_shared,
         });
 
         Ok(stack)
     }
 
-    /// hasSystemFeature("android.hardware.xxx")
     pub fn has_feature(&self, feature: &str) -> bool {
         match feature {
             "android.hardware.camera"
@@ -120,7 +122,7 @@ impl HardwareStack {
             "android.hardware.screen.landscape"
             | "android.hardware.screen.portrait" => self.profile.display.present,
             "android.hardware.opengles.aep"
-            | "android.software.opengles.deqp.level" => true, // we always claim GLES
+            | "android.software.opengles.deqp.level" => true,
             _ => false,
         }
     }
@@ -133,6 +135,7 @@ impl HardwareStack {
             self.profile.display.width,
             self.profile.display.height,
             self.profile.display.refresh_hz,
+            self.ui_shared.clone(),
         )?;
         *self.display.write() = Some(surface);
         Ok(())

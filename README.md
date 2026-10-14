@@ -1,45 +1,19 @@
 # pixel1-translator
 
-**High-Level Emulation (HLE)** for Android 7.1 (Pixel 1 / sailfish) with a full **dynamic linker** and **OpenGL ES → Desktop GL** bridge.
+**High-Level Emulation** for Android 7.1 (Pixel 1 / sailfish) with full **UI lifecycle**, dynamic linker and GLES bridge.
 
-## Architecture
+## UI State Machine
 
 ```
-APK (lib/arm64-v8a/libunity.so)
-         │
-         ▼
-┌─────────────────────────────────────────────┐
-│  ApkElfExecutor  (HLE linker)               │
-│  - unzip lib/arm64-v8a/*.so                 │
-│  - PT_LOAD → RWX host mapping               │
-│  - RELA patching                            │
-│  - symbol redirect → gles_bridge            │
-│  - JNI_OnLoad with mocked JavaVM            │
-└────────────────────┬────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────┐
-│  GLES Bridge (extern "C")                   │
-│  egl* / gl*  →  glow::Context (GL 4.5)      │
-└────────────────────┬────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────┐
-│  HardwareStack + Binder + SyscallTranslator │
-└─────────────────────────────────────────────┘
+AppPicker  →  BootAnimation  →  ApkLoading  →  GameRunning
+   │               │                 │               │
+ egui drawer   spinning logo   progress bar    pure GLES
 ```
 
-## Features
-
-| Feature | Status |
-|---------|--------|
-| GLES/EGL HLE bridge | ✅ |
-| Global glow context | ✅ |
-| APK extraction (zip) | ✅ |
-| PT_LOAD mapping + mprotect | ✅ |
-| Symbol resolver (EGL/GLES/bionic) | ✅ |
-| JNI_OnLoad bootstrap | ✅ |
-| Graceful missing-symbol stubs | ✅ |
+- **AppPicker**: vintage Android drawer, scans `./` and `./apks/` for `.apk` files
+- **BootAnimation**: pure-egui pulsing/spinning Android-style logo (~2.2 s)
+- **ApkLoading**: live progress fed by the HLE linker (extract → map → relocate → JNI_OnLoad)
+- **GameRunning**: UI drops, `libunity.so` owns the 1920×1080 canvas
 
 ## Quick start
 
@@ -47,19 +21,25 @@ APK (lib/arm64-v8a/libunity.so)
 cargo run --release
 ```
 
-To test the full linker path, place any APK that contains `lib/arm64-v8a/libunity.so` (or another engine) as `demo.apk` next to the binary:
+Drop any `.apk` that contains `lib/arm64-v8a/*.so` next to the binary (or inside `apks/`) and click it in the picker.
 
-```bash
-cp /path/to/your.apk demo.apk
-cargo run --release
+## Architecture
+
 ```
-
-## Feature flag
-
-```bash
-cargo check --features loader
+APK
+ → ApkElfExecutor (progress → UI)
+ → PT_LOAD + RELA + JNI_OnLoad
+ → GLES Bridge (egl*/gl* → glow)
+ → 1920×1080 sailfish surface
 ```
 
 ## Status
 
-Production-grade skeleton. The linker will load real ARM64 `.so` files, map them, and call `JNI_OnLoad`. Unresolved symbols fall back to safe stubs instead of crashing.
+| Component              | Status |
+|------------------------|--------|
+| egui state machine     | ✅     |
+| Boot animation         | ✅     |
+| Live loading progress  | ✅     |
+| APK picker             | ✅     |
+| Dynamic linker         | ✅     |
+| GLES HLE bridge        | ✅     |
