@@ -91,7 +91,7 @@ impl Pixel1Translator {
                                 cpu_clone.attach_linker(executor);
                                 hardware::display::DisplaySurface::set_state(
                                     &ui_clone,
-                                    EmulatorState::GameRunning { apk_name: name },
+                                    EmulatorState::GameRunning { apk_name: name.clone() },
                                 );
                                 loaded = true;
                                 break;

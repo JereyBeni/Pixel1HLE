@@ -20,7 +20,6 @@ pub const EGL_FALSE: EGLBoolean = 0;
 pub const EGL_SUCCESS: EGLint = 0x3000;
 pub const EGL_NONE: EGLint = 0x3038;
 
-// Fake handles – pure hex only (0-9 A-F)
 static mut FAKE_DISPLAY: u64 = 0xE6_D15_F00D;
 static mut FAKE_CONFIG: u64 = 0xE6_C0_FFEE;
 static mut FAKE_SURFACE: u64 = 0xE6_5A_FACE;
@@ -148,10 +147,13 @@ pub unsafe extern "C" fn glGenBuffers(n: i32, buffers: *mut u32) {
     debug!(target: "hle::gles", "glGenBuffers({n})");
     with_gl(|gl| unsafe {
         if n > 0 && !buffers.is_null() {
-            let mut ids = vec![0u32; n as usize];
-            gl.gen_buffers(&mut ids);
-            for (i, id) in ids.iter().enumerate() {
-                *buffers.add(i) = *id;
+            for i in 0..n as usize {
+                // glow 0.14: create one buffer at a time
+                if let Ok(buf) = gl.create_buffer() {
+                    *buffers.add(i) = buf.0.get();
+                } else {
+                    *buffers.add(i) = 0;
+                }
             }
         }
     });
@@ -176,7 +178,7 @@ pub unsafe extern "C" fn glBufferData(
     debug!(target: "hle::gles", "glBufferData(0x{target:x}, size={size}, usage=0x{usage:x})");
     with_gl(|gl| unsafe {
         if data.is_null() {
-            gl.buffer_data_size(target, size, usage);
+            gl.buffer_data_size(target, size as i32, usage);
         } else {
             let slice = std::slice::from_raw_parts(data as *const u8, size as usize);
             gl.buffer_data_u8_slice(target, slice, usage);

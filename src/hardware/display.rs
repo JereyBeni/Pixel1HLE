@@ -202,22 +202,20 @@ pub fn run_ui_loop(ui_shared: SharedUi, width: u32, height: u32) -> Result<()> {
             gl_display.get_proc_address(&std::ffi::CString::new(s).unwrap()) as *const _
         })
     };
-    let gl = Arc::new(Mutex::new(gl));
-    let _ = GL_CONTEXT.set(gl.clone());
-
-    // egui_glow 0.29 API: EguiGlow::new takes (&EventLoop, glow::Context, ...)
-    let gl_for_egui = {
-        let guard = gl.lock();
-        // We need a clone of the Context. glow::Context is not Clone by default
-        // in all versions; create a second loader-based context sharing the same display.
+    let gl = Arc::new(gl);
+    // Also keep a Mutex version for the GLES bridge
+    let gl_mutex = Arc::new(Mutex::new({
+        // second context sharing the same display for the bridge
         unsafe {
             glow::Context::from_loader_function(|s| {
                 gl_display.get_proc_address(&std::ffi::CString::new(s).unwrap()) as *const _
             })
         }
-    };
+    }));
+    let _ = GL_CONTEXT.set(gl_mutex);
 
-    let mut egui_glow = egui_glow::EguiGlow::new(&event_loop, gl_for_egui, None, None, false);
+    // egui_glow 0.29 expects Arc<glow::Context>
+    let mut egui_glow = egui_glow::EguiGlow::new(&event_loop, Arc::clone(&gl), None, None, false);
     let mut egui_winit = egui_winit::State::new(
         egui_glow.egui_ctx.clone(),
         egui::ViewportId::ROOT,
@@ -273,12 +271,9 @@ pub fn run_ui_loop(ui_shared: SharedUi, width: u32, height: u32) -> Result<()> {
                             }
                         }
 
-                        {
-                            let gl = gl.lock();
-                            unsafe {
-                                gl.clear_color(0.0, 0.0, 0.0, 1.0);
-                                gl.clear(glow::COLOR_BUFFER_BIT);
-                            }
+                        unsafe {
+                            gl.clear_color(0.0, 0.0, 0.0, 1.0);
+                            gl.clear(glow::COLOR_BUFFER_BIT);
                         }
 
                         match state {
