@@ -33,6 +33,9 @@ egui = "0.29"
 egui_glow = "0.29"
 egui-winit = "0.29"
 
+# Native file dialog ("Import ya!")
+rfd = "0.15"
+
 # Audio
 cpal = "0.15"
 

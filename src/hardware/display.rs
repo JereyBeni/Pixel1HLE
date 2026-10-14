@@ -10,7 +10,6 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Global glow context – GLES hooks reach the GPU through this.
 pub static GL_CONTEXT: OnceCell<Arc<Mutex<glow::Context>>> = OnceCell::new();
 
 pub fn with_gl<F, R>(f: F) -> Option<R>
@@ -28,7 +27,6 @@ pub struct DisplaySurface {
     pub height: u32,
     pub refresh_hz: u32,
     _gl_context: Arc<Mutex<glow::Context>>,
-    /// Shared UI state (linker writes progress here)
     pub ui_shared: SharedUi,
 }
 
@@ -62,7 +60,6 @@ impl DisplaySurface {
         })
     }
 
-    /// Bridge used by the linker to push progress onto the loading screen
     pub fn update_loading_progress(shared: &SharedUi, progress: f32, status: &str) {
         let mut g = shared.lock();
         g.loading_progress = progress.clamp(0.0, 1.0);
@@ -83,7 +80,6 @@ impl DisplaySurface {
     }
 }
 
-/// Create a glow::Context (windowed, starts hidden)
 unsafe fn create_glow_context(width: u32, height: u32) -> Result<glow::Context> {
     use glutin::config::ConfigTemplateBuilder;
     use glutin::context::{ContextApi, ContextAttributesBuilder, Version};
@@ -103,7 +99,6 @@ unsafe fn create_glow_context(width: u32, height: u32) -> Result<glow::Context> 
         .with_visible(true);
 
     let template = ConfigTemplateBuilder::new().with_alpha_size(8);
-
     let display_builder = DisplayBuilder::new().with_window_attributes(Some(window_attrs));
 
     let (window, gl_config) = display_builder
@@ -121,12 +116,7 @@ unsafe fn create_glow_context(width: u32, height: u32) -> Result<glow::Context> 
         .map_err(|e| Pixel1Error::Display(format!("glutin display: {e}")))?;
 
     let window = window.ok_or_else(|| Pixel1Error::Display("no window".into()))?;
-
-    let raw_handle = window
-        .window_handle()
-        .map_err(|e| Pixel1Error::Display(e.to_string()))?
-        .as_raw();
-
+    let raw_handle = window.window_handle().map_err(|e| Pixel1Error::Display(e.to_string()))?.as_raw();
     let gl_display = gl_config.display();
 
     let context_attribs = ContextAttributesBuilder::new()
@@ -137,23 +127,17 @@ unsafe fn create_glow_context(width: u32, height: u32) -> Result<glow::Context> 
         .create_context(&gl_config, &context_attribs)
         .map_err(|e| Pixel1Error::Display(format!("create_context: {e}")))?;
 
-    let attrs = window
-        .build_surface_attributes(Default::default())
+    let attrs = window.build_surface_attributes(Default::default())
         .map_err(|e| Pixel1Error::Display(format!("surface attrs: {e}")))?;
-
-    let surface = gl_display
-        .create_window_surface(&gl_config, &attrs)
+    let surface = gl_display.create_window_surface(&gl_config, &attrs)
         .map_err(|e| Pixel1Error::Display(format!("create_surface: {e}")))?;
-
-    let context = not_current
-        .make_current(&surface)
+    let context = not_current.make_current(&surface)
         .map_err(|e| Pixel1Error::Display(format!("make_current: {e}")))?;
 
     let gl = glow::Context::from_loader_function(|s| {
         gl_display.get_proc_address(&std::ffi::CString::new(s).unwrap()) as *const _
     });
 
-    // Keep alive for process lifetime (HLE style)
     std::mem::forget(surface);
     std::mem::forget(context);
     std::mem::forget(window);
@@ -162,19 +146,13 @@ unsafe fn create_glow_context(width: u32, height: u32) -> Result<glow::Context> 
     Ok(gl)
 }
 
-/// Run the main UI / game loop.
-/// This is the single place that owns the winit event loop + egui.
-pub fn run_ui_loop(
-    ui_shared: SharedUi,
-    width: u32,
-    height: u32,
-) -> Result<()> {
+pub fn run_ui_loop(ui_shared: SharedUi, width: u32, height: u32) -> Result<()> {
     use glutin::config::ConfigTemplateBuilder;
     use glutin::context::{ContextApi, ContextAttributesBuilder, Version};
     use glutin::display::{GetGlDisplay, GlDisplay};
     use glutin::prelude::*;
     use glutin::surface::SwapInterval;
-    use glutin_winit::{DisplayBuilder, GlWindow};
+    use glutin_winit::DisplayBuilder;
     use raw_window_handle::HasWindowHandle;
     use winit::dpi::PhysicalSize;
     use winit::event::{Event, WindowEvent};
@@ -209,10 +187,8 @@ pub fn run_ui_loop(
         .with_context_api(ContextApi::OpenGl(Some(Version::new(4, 5))))
         .build(Some(raw_handle));
 
-    let not_current = gl_display
-        .create_context(&gl_config, &context_attribs)
+    let not_current = gl_display.create_context(&gl_config, &context_attribs)
         .map_err(|e| Pixel1Error::Display(format!("{e}")))?;
-
     let attrs = window.build_surface_attributes(Default::default())
         .map_err(|e| Pixel1Error::Display(format!("{e}")))?;
     let surface = gl_display.create_window_surface(&gl_config, &attrs)
@@ -220,7 +196,6 @@ pub fn run_ui_loop(
     let context = not_current.make_current(&surface)
         .map_err(|e| Pixel1Error::Display(format!("{e}")))?;
 
-    // VSync
     let _ = surface.set_swap_interval(&context, SwapInterval::Wait(std::num::NonZeroU32::new(1).unwrap()));
 
     let gl = unsafe {
@@ -231,7 +206,6 @@ pub fn run_ui_loop(
     let gl = Arc::new(Mutex::new(gl));
     let _ = GL_CONTEXT.set(gl.clone());
 
-    // egui setup
     let mut egui_glow = egui_glow::EguiGlow::new(&event_loop, gl.lock().clone(), None, None, false);
     let mut egui_winit = egui_winit::State::new(
         egui_glow.egui_ctx.clone(),
@@ -245,7 +219,6 @@ pub fn run_ui_loop(
     let start = Instant::now();
     let mut boot_timer: Option<Instant> = None;
 
-    // Scan for APKs once at start
     {
         let mut g = ui_shared.lock();
         g.available_apks = scan_apks();
@@ -257,9 +230,10 @@ pub fn run_ui_loop(
 
         match event {
             Event::WindowEvent { event, .. } => {
-                let mut g = ui_shared.lock();
-                let is_ui = !matches!(g.state, EmulatorState::GameRunning { .. });
-                drop(g);
+                let is_ui = {
+                    let g = ui_shared.lock();
+                    !matches!(g.state, EmulatorState::GameRunning { .. })
+                };
 
                 if is_ui {
                     let response = egui_winit.on_window_event(&window, &event);
@@ -274,7 +248,6 @@ pub fn run_ui_loop(
                         let time = start.elapsed().as_secs_f64();
                         let state = ui_shared.lock().state.clone();
 
-                        // Auto-transition BootAnimation → ApkLoading after ~2.2 s
                         if let EmulatorState::BootAnimation { apk_name } = &state {
                             if boot_timer.is_none() {
                                 boot_timer = Some(Instant::now());
@@ -288,7 +261,6 @@ pub fn run_ui_loop(
                             }
                         }
 
-                        // Clear
                         {
                             let gl = gl.lock();
                             unsafe {
@@ -299,11 +271,9 @@ pub fn run_ui_loop(
 
                         match state {
                             EmulatorState::GameRunning { .. } => {
-                                // Pure game surface – no egui overlay
-                                // libunity.so draws via the GLES bridge
+                                // pure game surface
                             }
                             _ => {
-                                // UI states
                                 let raw_input = egui_winit.take_egui_input(&window);
                                 let full_output = egui_glow.run(elwt, |ctx| {
                                     match &ui_shared.lock().state {
@@ -339,8 +309,8 @@ pub fn run_ui_loop(
 
 fn scan_apks() -> Vec<crate::ui::ApkEntry> {
     let mut list = Vec::new();
-    // Look in current dir and ./apks/
-    for dir in [".", "apks"] {
+    // Support both the release layout (apps/) and the old locations
+    for dir in [".", "apps", "apks"] {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for e in entries.flatten() {
                 let path = e.path();

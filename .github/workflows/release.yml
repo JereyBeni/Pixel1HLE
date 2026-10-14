@@ -1,0 +1,240 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag to publish (e.g. v0.2.0)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # Windows executable package
+  # ─────────────────────────────────────────────────────────────
+  windows:
+    name: Windows (x86_64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release --features loader
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+
+      - name: Assemble distribution workspace
+        shell: pwsh
+        run: |
+          $Out = "dist/pixel1-translator-windows-x86_64"
+          New-Item -ItemType Directory -Force -Path $Out | Out-Null
+          New-Item -ItemType Directory -Force -Path "$Out/config" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$Out/apps" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$Out/fonts" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$Out/assets" | Out-Null
+
+          # Core binary
+          Copy-Item "target/release/pixel1-translator.exe" "$Out/pixel1-translator.exe"
+
+          # Config profile
+          Copy-Item "config/pixel1-sailfish.yaml" "$Out/config/pixel1-sailfish.yaml"
+
+          # Placeholder readmes so empty folders survive zip
+          Set-Content -Path "$Out/apps/README.txt" -Value "Drop your .apk files here. The AppPicker will pick them up automatically.`nYou can also use the 'Import ya!' button inside the emulator."
+          Set-Content -Path "$Out/fonts/README.txt" -Value "Optional custom fonts for the egui UI."
+          Set-Content -Path "$Out/assets/README.txt" -Value "Optional UI graphics / icons."
+
+          # Version stamp
+          $Version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "dev-$(Get-Date -Format yyyyMMdd)" }
+          Set-Content -Path "$Out/VERSION.txt" -Value $Version
+
+      - name: Zip Windows package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/pixel1-translator-windows-x86_64/*" `
+                           -DestinationPath "dist/pixel1-translator-windows-x86_64.zip" `
+                           -Force
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: dist/pixel1-translator-windows-x86_64.zip
+          retention-days: 14
+
+  # ─────────────────────────────────────────────────────────────
+  # Android target (self-hosted HLE runtime layout)
+  # Produces a zip that, when extracted under the app sandbox,
+  # routes all data to Android/data/com.pixel.hle/
+  # ─────────────────────────────────────────────────────────────
+  android:
+    name: Android runtime package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # We ship the host binary + an Android-oriented layout.
+      # Full NDK cross-compile of the whole HLE is future work;
+      # this job produces the sandboxed directory structure expected
+      # when the HLE runs inside an Android environment.
+      - name: Build host release (used as reference binary)
+        run: cargo build --release --features loader
+
+      - name: Assemble Android sandbox layout
+        run: |
+          OUT=dist/pixel1-hle-android
+          mkdir -p "$OUT/Android/data/com.pixel.hle"/{config,apps,fonts,assets,cache,logs}
+
+          # Config that forces the sandboxed paths
+          cp config/pixel1-sailfish.yaml "$OUT/Android/data/com.pixel.hle/config/"
+
+          # Marker so the runtime knows it is on Android
+          cat > "$OUT/Android/data/com.pixel.hle/ANDROID_SANDBOX" << 'EOF'
+          # Pixel1HLE Android sandbox marker
+          # All reads/writes must stay under this directory.
+          # Package name: com.pixel.hle
+          EOF
+
+          # Minimal AndroidManifest.xml stub (for packaging tools / future APK wrapper)
+          cat > "$OUT/AndroidManifest.xml" << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.pixel.hle"
+              android:versionCode="1"
+              android:versionName="0.1.0">
+              <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="25" />
+              <application
+                  android:label="Pixel1HLE"
+                  android:hasCode="true"
+                  android:extractNativeLibs="true">
+                  <activity android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="landscape"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          # Placeholder guidance
+          echo "Drop guest .apk files into apps/" > "$OUT/Android/data/com.pixel.hle/apps/README.txt"
+          echo "Optional fonts" > "$OUT/Android/data/com.pixel.hle/fonts/README.txt"
+          echo "Optional assets" > "$OUT/Android/data/com.pixel.hle/assets/README.txt"
+
+          # Version
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "${{ github.ref_name }}" > "$OUT/VERSION.txt"
+          else
+            echo "dev-$(date +%Y%m%d)" > "$OUT/VERSION.txt"
+          fi
+
+          # Also ship the Linux binary for reference / Termux-style runs
+          mkdir -p "$OUT/bin"
+          cp target/release/pixel1-translator "$OUT/bin/" || true
+
+      - name: Zip Android package
+        run: |
+          cd dist
+          zip -r pixel1-hle-android.zip pixel1-hle-android
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-runtime
+          path: dist/pixel1-hle-android.zip
+          retention-days: 14
+
+  # ─────────────────────────────────────────────────────────────
+  # Publish GitHub Release (draft) with both packages
+  # ─────────────────────────────────────────────────────────────
+  release:
+    name: Publish Release
+    needs: [windows, android]
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-x86_64
+          path: artifacts
+
+      - name: Download Android artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: android-runtime
+          path: artifacts
+
+      - name: Determine tag name
+        id: tag
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          elif [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "name=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "name=dev-$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release (draft)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: Pixel1HLE ${{ steps.tag.outputs.name }}
+          draft: true
+          generate_release_notes: true
+          files: |
+            artifacts/pixel1-translator-windows-x86_64.zip
+            artifacts/pixel1-hle-android.zip
+          body: |
+            ## Pixel1HLE ${{ steps.tag.outputs.name }}
+
+            ### Windows package
+            - Extract `pixel1-translator-windows-x86_64.zip`
+            - Run `pixel1-translator.exe`
+            - Drop guest APKs into the `apps/` folder **or** use the **Import ya!** button inside the AppPicker
+
+            ### Android runtime package
+            - Extract under the app sandbox so the layout becomes:
+              `Android/data/com.pixel.hle/{config,apps,fonts,assets,cache,logs}`
+            - All HLE reads/writes stay inside that sandbox
+            - `AndroidManifest.xml` is included for packaging / future wrapper APKs
+
+            ### Notes
+            - First launch opens the AppPicker (1920×1080 sailfish canvas)
+            - Select an APK → BootAnimation → ApkLoading (live linker progress) → GameRunning
