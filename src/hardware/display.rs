@@ -6,7 +6,6 @@ use crate::ui::{AppPicker, BootAnimation, EmulatorState, LoadingScreen, SharedUi
 use glow::HasContext;
 use log::{info, warn};
 use once_cell::sync::OnceCell;
-use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -102,7 +101,6 @@ impl winit::application::ApplicationHandler for AppState {
             Ok((gl_window, gl)) => {
                 let gl = Arc::new(gl);
 
-                // Publish for GLES bridge hooks
                 if GL_CONTEXT.set(Arc::clone(&gl)).is_err() {
                     warn!(target: "hle::display", "GL_CONTEXT already set");
                 }
@@ -209,10 +207,7 @@ impl winit::application::ApplicationHandler for AppState {
                 }
 
                 use glutin::prelude::GlSurface;
-                gl_window
-                    .gl_surface
-                    .swap_buffers(&gl_window.gl_context)
-                    .ok();
+                let _ = gl_window.gl_surface.swap_buffers(&gl_window.gl_context);
             }
             _ => {}
         }
@@ -273,18 +268,25 @@ fn create_display(
         .with_context_api(ContextApi::OpenGl(Some(Version::new(4, 5))))
         .build(Some(raw_handle));
 
-    let not_current = gl_display
-        .create_context(&gl_config, &context_attribs)
-        .map_err(|e| Pixel1Error::Display(format!("{e}")))?;
+    // glutin marks these as unsafe – isolate the FFI boundary here
+    let not_current = unsafe {
+        gl_display
+            .create_context(&gl_config, &context_attribs)
+            .map_err(|e| Pixel1Error::Display(format!("create_context: {e}")))?
+    };
 
     let attrs = GlWindow::build_surface_attributes(&window, Default::default())
-        .map_err(|e| Pixel1Error::Display(format!("{e}")))?;
-    let gl_surface = gl_display
-        .create_window_surface(&gl_config, &attrs)
-        .map_err(|e| Pixel1Error::Display(format!("{e}")))?;
+        .map_err(|e| Pixel1Error::Display(format!("surface attrs: {e}")))?;
+
+    let gl_surface = unsafe {
+        gl_display
+            .create_window_surface(&gl_config, &attrs)
+            .map_err(|e| Pixel1Error::Display(format!("create_window_surface: {e}")))?
+    };
+
     let gl_context = not_current
         .make_current(&gl_surface)
-        .map_err(|e| Pixel1Error::Display(format!("{e}")))?;
+        .map_err(|e| Pixel1Error::Display(format!("make_current: {e}")))?;
 
     let _ = gl_surface.set_swap_interval(
         &gl_context,
