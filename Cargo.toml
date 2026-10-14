@@ -6,10 +6,17 @@ authors = ["JereyBeni"]
 description = "High-Level Emulation (HLE) compatibility layer for Google Pixel 1 (sailfish) Android 7.1 apps"
 license = "MIT"
 
+[features]
+default = []
+loader = []  # enables full APK/ELF dynamic linker path
+
 [dependencies]
 # ELF parsing & memory mapping
-object = { version = "0.36", features = ["read", "elf"] }
+object = { version = "0.36", features = ["read", "elf", "write"] }
 memmap2 = "0.9"
+
+# APK extraction
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
 
 # Error handling & logging
 thiserror = "1.0"
@@ -36,6 +43,7 @@ parking_lot = "0.12"
 bitflags = "2.6"
 bytemuck = { version = "1.16", features = ["derive"] }
 lazy_static = "1.5"
+libc = "0.2"
 
 [profile.release]
 lto = true

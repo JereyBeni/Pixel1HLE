@@ -1,29 +1,17 @@
 //! pixel1-translator – High-Level Emulation layer for Google Pixel 1 (sailfish)
 //!
-//! Architecture cascade (guest → host):
+//! Full cascade:
 //!
-//!   Android App / libunity.so (ARM64)
+//!   APK (lib/arm64-v8a/libunity.so)
 //!        │
 //!        ▼
-//!   ┌─────────────────────────────────────────────┐
-//!   │  BinderRuntime  (getSystemService …)        │
-//!   └────────────────────┬────────────────────────┘
-//!                        │
-//!                        ▼
-//!   ┌─────────────────────────────────────────────┐
-//!   │  HardwareStack + GLES Bridge                │
-//!   │  (egl* / gl* extern "C" → glow::Context)    │
-//!   └────────────────────┬────────────────────────┘
-//!                        │
-//!                        ▼
-//!   ┌─────────────────────────────────────────────┐
-//!   │  SyscallTranslator  (bionic → host)         │
-//!   └────────────────────┬────────────────────────┘
-//!                        │
-//!                        ▼
-//!   ┌─────────────────────────────────────────────┐
-//!   │  CpuRuntime  (ELF + JNI hooks)              │
-//!   └─────────────────────────────────────────────┘
+//!   ApkElfExecutor  (extract → PT_LOAD map → RELA patch → JNI_OnLoad)
+//!        │
+//!        ▼
+//!   GLES Bridge (extern "C" egl*/gl* → glow)
+//!        │
+//!        ▼
+//!   HardwareStack + Binder + SyscallTranslator
 
 pub mod binder;
 pub mod cpu;
@@ -32,12 +20,13 @@ pub mod hardware;
 pub mod syscall;
 
 pub use binder::BinderRuntime;
-pub use cpu::CpuRuntime;
+pub use cpu::{ApkElfExecutor, CpuRuntime, LoadedLibrary};
 pub use error::{Pixel1Error, Result};
 pub use hardware::HardwareStack;
 pub use syscall::SyscallTranslator;
 
 use log::info;
+use std::path::Path;
 use std::sync::Arc;
 
 /// Top-level runtime that owns every subsystem
@@ -50,7 +39,7 @@ pub struct Pixel1Translator {
 
 impl Pixel1Translator {
     pub fn new(profile_path: &str) -> Result<Self> {
-        info!("Pixel1Translator: booting sailfish HLE + GLES bridge");
+        info!("Pixel1Translator: booting sailfish HLE + GLES + dynamic linker");
 
         let profile_str = std::fs::read_to_string(profile_path)
             .map_err(|e| Pixel1Error::Config(e.to_string()))?;
@@ -64,8 +53,6 @@ impl Pixel1Translator {
         let cpu = Arc::new(CpuRuntime::new());
         let syscall = Arc::new(SyscallTranslator::new());
 
-        // Register the GLES/EGL symbols so any future ELF load of libGLESv2.so
-        // can be redirected straight into our extern "C" table.
         hardware::gles_bridge::register_gles_symbols(&cpu);
 
         let allowlist = vec![
@@ -85,7 +72,32 @@ impl Pixel1Translator {
         })
     }
 
-    /// Full Unity-style graphics bootstrap demonstration
+    /// Full APK → native library execution path
+    ///
+    /// 1. Open the APK
+    /// 2. Extract lib/arm64-v8a/<engine>.so
+    /// 3. Map PT_LOAD, apply relocations, hook EGL/GLES symbols
+    /// 4. Call JNI_OnLoad with a mocked JavaVM
+    pub fn load_and_run_apk(&self, apk_path: &Path, engine_soname: &str) -> Result<Arc<LoadedLibrary>> {
+        info!(target: "hle::linker", "=== APK execution cascade: {} ===", apk_path.display());
+
+        let executor = ApkElfExecutor::new(apk_path);
+
+        // Discover what is inside
+        let libs = executor.list_native_libs()?;
+        info!(target: "hle::linker", "Native libs: {:?}", libs);
+
+        // Load the engine (libunity.so, libminecraftpe.so, …)
+        let lib = executor.bootstrap_engine(engine_soname)?;
+
+        // Keep the executor alive inside the CPU runtime
+        self.cpu.attach_linker(executor);
+
+        info!(target: "hle::linker", "Engine {} is live @ guest 0x{:x}", engine_soname, lib.guest_base);
+        Ok(lib)
+    }
+
+    /// Convenience demo that only exercises the GLES path (no real APK needed)
     pub fn demo_unity_graphics(&self) {
         self.cpu.demo_unity_graphics_bootstrap();
     }

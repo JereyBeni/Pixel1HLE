@@ -1,46 +1,45 @@
 # pixel1-translator
 
-**High-Level Emulation (HLE) compatibility layer** for Android 7.1 apps compiled for the Google Pixel 1 (`sailfish`).
-
-Now includes a full **OpenGL ES → Desktop GL** translation bridge aimed at Unity (`libunity.so`) and similar native engines.
+**High-Level Emulation (HLE)** for Android 7.1 (Pixel 1 / sailfish) with a full **dynamic linker** and **OpenGL ES → Desktop GL** bridge.
 
 ## Architecture
 
 ```
-Android App / libunity.so (ARM64)
+APK (lib/arm64-v8a/libunity.so)
          │
          ▼
 ┌─────────────────────────────────────────────┐
-│  BinderRuntime                              │
+│  ApkElfExecutor  (HLE linker)               │
+│  - unzip lib/arm64-v8a/*.so                 │
+│  - PT_LOAD → RWX host mapping               │
+│  - RELA patching                            │
+│  - symbol redirect → gles_bridge            │
+│  - JNI_OnLoad with mocked JavaVM            │
 └────────────────────┬────────────────────────┘
                      │
                      ▼
 ┌─────────────────────────────────────────────┐
-│  HardwareStack + GLES Bridge                │
-│  extern "C" egl* / gl*  →  glow::Context    │
-│  (glutin Core GL 4.5, 1920×1080@60)         │
+│  GLES Bridge (extern "C")                   │
+│  egl* / gl*  →  glow::Context (GL 4.5)      │
 └────────────────────┬────────────────────────┘
                      │
                      ▼
 ┌─────────────────────────────────────────────┐
-│  SyscallTranslator                          │
-└────────────────────┬────────────────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────┐
-│  CpuRuntime (ELF + JNI + Unity bootstrap)   │
+│  HardwareStack + Binder + SyscallTranslator │
 └─────────────────────────────────────────────┘
 ```
 
-## GLES / EGL symbols exported
+## Features
 
-`eglGetDisplay`, `eglInitialize`, `eglChooseConfig`, `eglCreateWindowSurface`,
-`eglCreateContext`, `eglMakeCurrent`, `eglSwapBuffers`, `eglGetError`, …
-
-`glViewport`, `glClear`, `glClearColor`, `glGenBuffers`, `glBindBuffer`,
-`glBufferData`, `glDrawElements`, `glEnable`, `glDisable`, `glGetString`, …
-
-All of them are real `extern "C"` entry points that forward into a single global `glow::Context`.
+| Feature | Status |
+|---------|--------|
+| GLES/EGL HLE bridge | ✅ |
+| Global glow context | ✅ |
+| APK extraction (zip) | ✅ |
+| PT_LOAD mapping + mprotect | ✅ |
+| Symbol resolver (EGL/GLES/bionic) | ✅ |
+| JNI_OnLoad bootstrap | ✅ |
+| Graceful missing-symbol stubs | ✅ |
 
 ## Quick start
 
@@ -48,27 +47,19 @@ All of them are real `extern "C"` entry points that forward into a single global
 cargo run --release
 ```
 
-You will see the full Unity-style cascade:
+To test the full linker path, place any APK that contains `lib/arm64-v8a/libunity.so` (or another engine) as `demo.apk` next to the binary:
 
-```
-eglGetDisplay → fake display
-eglInitialize
-eglChooseConfig
-eglCreateWindowSurface → 1920x1080 sailfish surface
-eglMakeCurrent
-glViewport(0, 0, 1920, 1080)
-glClearColor(...)
-glClear(...)
-glGenBuffers / glBindBuffer / glBufferData
+```bash
+cp /path/to/your.apk demo.apk
+cargo run --release
 ```
 
-## Profile
+## Feature flag
 
-Everything is driven by `config/pixel1-sailfish.yaml`.
+```bash
+cargo check --features loader
+```
 
 ## Status
 
-- ✅ GLES/EGL HLE bridge (no todo!() in render path)
-- ✅ Global glow context reachable from guest code
-- ✅ Unity bootstrap demo that exercises the whole pipeline
-- Next: real frame loop + swap, texture upload path, more GLES 3.x entry points
+Production-grade skeleton. The linker will load real ARM64 `.so` files, map them, and call `JNI_OnLoad`. Unresolved symbols fall back to safe stubs instead of crashing.
