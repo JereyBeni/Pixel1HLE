@@ -1,6 +1,9 @@
-//! pixel1-translator – Full HLE with UI (desktop + Android NativeActivity)
-//! Engines: Unity, Minecraft PE, Adobe AIR (`libcom_adobe_air.so`)
+//! pixel1-translator – experimental HLE for sailfish / Android 7.1-era packages
+//!
+//! Guest AArch64 execution is only attempted on aarch64 hosts. On x86_64/Windows
+//! the loader maps and inspects libraries but refuses to call into guest code.
 
+pub mod apk_inspect;
 pub mod binder;
 pub mod cpu;
 pub mod error;
@@ -11,6 +14,7 @@ pub mod profile_embed;
 pub mod syscall;
 pub mod ui;
 
+pub use apk_inspect::{inspect_apk, Abi, ApkInfo};
 pub use binder::BinderRuntime;
 pub use cpu::{ApkElfExecutor, CpuRuntime, LoadedLibrary};
 pub use error::{Pixel1Error, Result};
@@ -88,6 +92,11 @@ impl Pixel1Translator {
         })
     }
 
+    /// Inspect an APK without executing anything.
+    pub fn inspect_apk_path(path: &Path) -> Result<ApkInfo> {
+        inspect_apk(path)
+    }
+
     pub fn run_ui(self) -> Result<()> {
         self.run_ui_with_event_loop(
             #[cfg(target_os = "android")]
@@ -127,6 +136,23 @@ impl Pixel1Translator {
 
                 if should_load {
                     info!(target: "hle::display", "Background loader for {name}");
+
+                    // Always inspect first (safe, no guest exec)
+                    match inspect_apk(Path::new(&path)) {
+                        Ok(meta) => {
+                            info!(
+                                target: "hle::apk",
+                                "APK meta: abis={:?} libs={} engine={}",
+                                meta.abis(),
+                                meta.native_libs.len(),
+                                meta.has_engine_candidate()
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!(target: "hle::apk", "inspect failed: {e}");
+                        }
+                    }
+
                     let executor = ApkElfExecutor::new(&path).with_ui(ui_clone.clone());
 
                     let result = executor.bootstrap_any_engine().or_else(|_| {
@@ -144,7 +170,7 @@ impl Pixel1Translator {
                         Ok(lib) => {
                             info!(
                                 target: "hle::linker",
-                                "Loaded {} @ 0x{:x} (AIR={})",
+                                "Mapped {} @ 0x{:x} (AIR={}) — guest code not run unless host is aarch64",
                                 lib.soname,
                                 lib.guest_base,
                                 lib.is_adobe_air
@@ -162,7 +188,7 @@ impl Pixel1Translator {
                             hardware::display::DisplaySurface::update_loading_progress(
                                 &ui_clone,
                                 1.0,
-                                &format!("No engine – demo ({e})"),
+                                &format!("Load/map issue: {e}"),
                             );
                             std::thread::sleep(std::time::Duration::from_millis(800));
                             hardware::display::DisplaySurface::set_state(
@@ -192,6 +218,7 @@ impl Pixel1Translator {
         apk_path: &Path,
         engine_soname: &str,
     ) -> Result<Arc<LoadedLibrary>> {
+        let _ = inspect_apk(apk_path)?;
         let executor = ApkElfExecutor::new(apk_path).with_ui(self.hw.ui_shared.clone());
         let lib = executor.bootstrap_engine(engine_soname)?;
         self.cpu.attach_linker(executor);
