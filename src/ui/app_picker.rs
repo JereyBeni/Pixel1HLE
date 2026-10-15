@@ -1,162 +1,448 @@
-//! HyperHLE-style technical launcher: status metrics + APK list + file explorer
+//! Compact HyperHLE launcher with Android-style quick-action bar
 
-use crate::ui::{ApkEntry, EmulatorState, SharedUi};
-use egui::{self, Color32, RichText, Vec2};
-use std::path::Path;
+use crate::ui::{ApkEntry, EmulatorState, LogFilterLevel, SharedUi};
+use egui::{self, Color32, RichText, Sense, Vec2};
 
 pub struct AppPicker;
 
 impl AppPicker {
     pub fn ui(ctx: &egui::Context, shared: &SharedUi) {
-        let mem_est = estimate_rss_mb();
+        let mem_est = 64.0_f32;
 
-        // ── Top status bar (HyperHLE metrics) ────────────────────────────
+        // ── Compact top status ───────────────────────────────────────────
         egui::TopBottomPanel::top("hle_status")
-            .exact_height(28.0)
-            .frame(egui::Frame::none().fill(Color32::from_rgb(16, 18, 26)).inner_margin(6.0))
+            .exact_height(24.0)
+            .frame(
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(18, 20, 28))
+                    .inner_margin(egui::Margin::symmetric(8.0, 3.0)),
+            )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
                     ui.label(
                         RichText::new("Pixel1HLE")
                             .strong()
                             .color(Color32::from_rgb(80, 220, 120))
-                            .size(14.0),
-                    );
-                    ui.separator();
-                    ui.label(
-                        RichText::new("sailfish · API 16–25 · Android 4.1–7.1")
-                            .color(Color32::from_rgb(140, 150, 170))
                             .size(12.0),
+                    );
+                    ui.label(
+                        RichText::new("·")
+                            .color(Color32::from_rgb(60, 70, 80))
+                            .size(11.0),
+                    );
+                    ui.label(
+                        RichText::new("API 16–25")
+                            .color(Color32::from_rgb(130, 140, 155))
+                            .size(11.0),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
-                            RichText::new(format!("RSS ≈ {mem_est:.0} MB"))
-                                .color(Color32::from_rgb(100, 180, 220))
-                                .size(12.0),
-                        );
-                        ui.separator();
-                        ui.label(
-                            RichText::new("HLE · arm64")
-                                .color(Color32::from_rgb(180, 160, 100))
-                                .size(12.0),
+                            RichText::new(format!("{mem_est:.0} MB"))
+                                .color(Color32::from_rgb(100, 170, 210))
+                                .size(11.0),
                         );
                     });
                 });
             });
 
-        // ── Bottom console strip (always visible summary) ────────────────
+        // ── Android-style quick action bar (Import ya! + gear) ───────────
+        egui::TopBottomPanel::top("hle_action_bar")
+            .exact_height(48.0)
+            .frame(
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(22, 26, 34))
+                    .inner_margin(egui::Margin::symmetric(10.0, 6.0)),
+            )
+            .show(ctx, |ui| {
+                draw_import_action_bar(ui, shared);
+            });
+
+        // Settings slide-out sheet
+        let show_settings = shared.lock().settings.show_settings;
+        if show_settings {
+            egui::SidePanel::right("hle_settings_sheet")
+                .exact_width(220.0)
+                .frame(
+                    egui::Frame::none()
+                        .fill(Color32::from_rgb(20, 24, 32))
+                        .inner_margin(10.0)
+                        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(40, 50, 60))),
+                )
+                .show(ctx, |ui| {
+                    draw_settings_sheet(ui, shared);
+                });
+        }
+
+        // ── Compact bottom hint ──────────────────────────────────────────
         egui::TopBottomPanel::bottom("hle_hint")
-            .exact_height(22.0)
-            .frame(egui::Frame::none().fill(Color32::from_rgb(10, 12, 16)).inner_margin(4.0))
+            .exact_height(18.0)
+            .frame(
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(12, 14, 18))
+                    .inner_margin(egui::Margin::symmetric(8.0, 2.0)),
+            )
             .show(ctx, |ui| {
                 ui.label(
-                    RichText::new(
-                        "` toggle terminal  ·  Import ya! / explorer for APKs  ·  Unity · Adobe AIR · arm64",
-                    )
-                    .size(11.0)
-                    .color(Color32::from_rgb(90, 100, 120)),
+                    RichText::new("` terminal  ·  Unity / AIR  ·  arm64")
+                        .size(10.0)
+                        .color(Color32::from_rgb(80, 90, 105)),
                 );
             });
 
+        // ── Main content: stacked library + explorer (no wide dual columns) ─
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(Color32::from_rgb(14, 16, 22)))
+            .frame(
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(16, 18, 24))
+                    .inner_margin(8.0),
+            )
             .show(ctx, |ui| {
-                ui.columns(2, |cols| {
-                    // LEFT: library of known APKs
-                    cols[0].heading(
-                        RichText::new("Library")
-                            .color(Color32::from_rgb(200, 210, 220))
-                            .size(16.0),
-                    );
-                    cols[0].separator();
+                ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
 
-                    let apks = shared.lock().available_apks.clone();
-                    if apks.is_empty() {
-                        cols[0].label(
-                            RichText::new("No APKs in apps/ yet.\nUse the explorer →")
-                                .color(Color32::from_rgb(120, 130, 150)),
-                        );
-                    } else {
-                        egui::ScrollArea::vertical().show(&mut cols[0], |ui| {
-                            for entry in &apks {
-                                let label = format!(
-                                    "▶  {}  ({:.1} MB)",
-                                    entry.name, entry.size_mb
-                                );
-                                if ui
-                                    .add(
-                                        egui::Button::new(
-                                            RichText::new(label)
-                                                .color(Color32::from_rgb(90, 220, 130))
-                                                .size(13.0),
-                                        )
-                                        .fill(Color32::from_rgb(24, 30, 38))
-                                        .min_size(Vec2::new(ui.available_width(), 32.0)),
-                                    )
-                                    .clicked()
-                                {
-                                    launch_apk(shared, &entry.path, &entry.name);
+                // Library section
+                ui.label(
+                    RichText::new("Library")
+                        .strong()
+                        .color(Color32::from_rgb(190, 200, 210))
+                        .size(13.0),
+                );
+                ui.add_space(2.0);
+
+                let apks = shared.lock().available_apks.clone();
+                let lib_h = (ui.available_height() * 0.32).clamp(80.0, 160.0);
+
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(20, 24, 32))
+                    .rounding(6.0)
+                    .inner_margin(6.0)
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(lib_h)
+                            .show(ui, |ui| {
+                                if apks.is_empty() {
+                                    ui.label(
+                                        RichText::new("No APKs — use Import ya! below")
+                                            .size(11.0)
+                                            .color(Color32::from_rgb(110, 120, 135)),
+                                    );
+                                } else {
+                                    for entry in &apks {
+                                        let short = truncate_name(&entry.name, 28);
+                                        let label = format!(
+                                            "▶  {short}  ·  {:.1} MB",
+                                            entry.size_mb
+                                        );
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    RichText::new(label)
+                                                        .color(Color32::from_rgb(90, 210, 130))
+                                                        .size(12.0),
+                                                )
+                                                .fill(Color32::from_rgb(28, 34, 42))
+                                                .rounding(4.0)
+                                                .min_size(Vec2::new(ui.available_width(), 28.0)),
+                                            )
+                                            .clicked()
+                                        {
+                                            launch_apk(shared, &entry.path, &entry.name);
+                                        }
+                                    }
                                 }
-                            }
-                        });
-                    }
+                            });
+                    });
 
-                    cols[0].add_space(8.0);
-                    if cols[0]
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Explorer")
+                            .strong()
+                            .color(Color32::from_rgb(190, 200, 210))
+                            .size(13.0),
+                    );
+                    if ui
                         .add(
                             egui::Button::new(
-                                RichText::new("↻ Rescan apps/")
-                                    .color(Color32::WHITE),
+                                RichText::new("↻")
+                                    .size(12.0)
+                                    .color(Color32::from_rgb(160, 170, 180)),
                             )
-                            .fill(Color32::from_rgb(40, 50, 64)),
+                            .fill(Color32::from_rgb(32, 38, 48))
+                            .rounding(4.0)
+                            .min_size(Vec2::new(28.0, 22.0)),
                         )
                         .clicked()
                     {
                         let list = rescan();
-                        shared.lock().available_apks = list;
-                    }
-
-                    // RIGHT: live file explorer
-                    cols[1].horizontal(|ui| {
-                        ui.heading(
-                            RichText::new("File Explorer")
-                                .color(Color32::from_rgb(200, 210, 220))
-                                .size(16.0),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        RichText::new("Import ya!")
-                                            .strong()
-                                            .color(Color32::from_rgb(20, 24, 28)),
-                                    )
-                                    .fill(Color32::from_rgb(80, 220, 120)),
-                                )
-                                .clicked()
-                            {
-                                do_system_import(shared);
-                            }
-                        });
-                    });
-                    cols[1].separator();
-
-                    // Explorer needs mutable access – lock briefly
-                    let picked = {
                         let mut g = shared.lock();
-                        g.explorer.ui(&mut cols[1])
-                    };
-                    if let Some(path) = picked {
-                        let name = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("imported.apk")
-                            .to_string();
-                        let path_str = path.to_string_lossy().to_string();
-                        register_and_launch(shared, &path_str, &name);
+                        g.available_apks = list;
+                        g.explorer.refresh();
                     }
                 });
+                ui.add_space(2.0);
+
+                // File explorer fills remaining space
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(20, 24, 32))
+                    .rounding(6.0)
+                    .inner_margin(6.0)
+                    .show(ui, |ui| {
+                        let picked = {
+                            let mut g = shared.lock();
+                            g.explorer.ui(ui)
+                        };
+                        if let Some(path) = picked {
+                            let name = path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("imported.apk")
+                                .to_string();
+                            let path_str = path.to_string_lossy().to_string();
+                            register_and_launch(shared, &path_str, &name);
+                        }
+                    });
             });
+    }
+}
+
+/// Android quick-settings style row: [Import ya!]  [⚙]
+fn draw_import_action_bar(ui: &mut egui::Ui, shared: &SharedUi) {
+    let bar_h = 36.0_f32;
+    let avail = ui.available_width();
+
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+
+        // Main tile – looks like an Android QS tile / toolbar action
+        let tile_w = (avail - 48.0).max(120.0);
+        let tile_size = Vec2::new(tile_w, bar_h);
+        let (tile_rect, tile_resp) =
+            ui.allocate_exact_size(tile_size, Sense::click());
+
+        let hovered = tile_resp.hovered();
+        let fill = if hovered {
+            Color32::from_rgb(40, 90, 55)
+        } else {
+            Color32::from_rgb(32, 70, 48)
+        };
+        ui.painter().rect_filled(tile_rect, 10.0, fill);
+        ui.painter().rect_stroke(
+            tile_rect,
+            10.0,
+            egui::Stroke::new(1.0_f32, Color32::from_rgb(70, 160, 100)),
+        );
+
+        // Download-style glyph + label
+        ui.painter().text(
+            egui::pos2(tile_rect.left() + 14.0, tile_rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            "⬇",
+            egui::FontId::proportional(16.0),
+            Color32::from_rgb(120, 230, 150),
+        );
+        ui.painter().text(
+            egui::pos2(tile_rect.left() + 36.0, tile_rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            "Import ya!",
+            egui::FontId::proportional(14.0),
+            Color32::from_rgb(220, 240, 225),
+        );
+        ui.painter().text(
+            egui::pos2(tile_rect.right() - 12.0, tile_rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            "APK",
+            egui::FontId::proportional(10.0),
+            Color32::from_rgb(100, 180, 120),
+        );
+
+        if tile_resp.clicked() {
+            do_system_import(shared);
+        }
+
+        // Gear tile – opens settings sheet
+        let gear_size = Vec2::new(bar_h, bar_h);
+        let (gear_rect, gear_resp) =
+            ui.allocate_exact_size(gear_size, Sense::click());
+        let gear_open = shared.lock().settings.show_settings;
+        let gear_fill = if gear_resp.hovered() || gear_open {
+            Color32::from_rgb(50, 58, 72)
+        } else {
+            Color32::from_rgb(34, 40, 52)
+        };
+        ui.painter().rect_filled(gear_rect, 10.0, gear_fill);
+        ui.painter().rect_stroke(
+            gear_rect,
+            10.0,
+            egui::Stroke::new(1.0_f32, Color32::from_rgb(70, 80, 100)),
+        );
+        ui.painter().text(
+            gear_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "⚙",
+            egui::FontId::proportional(18.0),
+            Color32::from_rgb(180, 190, 210),
+        );
+
+        if gear_resp.clicked() {
+            let mut g = shared.lock();
+            g.settings.show_settings = !g.settings.show_settings;
+        }
+    });
+}
+
+fn draw_settings_sheet(ui: &mut egui::Ui, shared: &SharedUi) {
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("Settings")
+                .strong()
+                .color(Color32::from_rgb(200, 210, 220))
+                .size(14.0),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("✕").size(12.0).color(Color32::WHITE))
+                        .fill(Color32::from_rgb(50, 40, 40))
+                        .rounding(4.0)
+                        .min_size(Vec2::new(24.0, 22.0)),
+                )
+                .clicked()
+            {
+                shared.lock().settings.show_settings = false;
+            }
+        });
+    });
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(6.0);
+
+    // Target API
+    ui.label(
+        RichText::new("Target API")
+            .size(11.0)
+            .color(Color32::from_rgb(130, 140, 155)),
+    );
+    {
+        let mut g = shared.lock();
+        let api = &mut g.settings.target_api;
+        ui.horizontal(|ui| {
+            for (label, val) in [("16", 16), ("19", 19), ("21", 21), ("25", 25)] {
+                let selected = *api == val;
+                let fill = if selected {
+                    Color32::from_rgb(50, 120, 80)
+                } else {
+                    Color32::from_rgb(32, 38, 48)
+                };
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new(label)
+                                .size(11.0)
+                                .color(Color32::WHITE),
+                        )
+                        .fill(fill)
+                        .rounding(4.0)
+                        .min_size(Vec2::new(36.0, 24.0)),
+                    )
+                    .clicked()
+                {
+                    *api = val;
+                }
+            }
+        });
+    }
+
+    ui.add_space(10.0);
+    ui.label(
+        RichText::new("Log filter")
+            .size(11.0)
+            .color(Color32::from_rgb(130, 140, 155)),
+    );
+    {
+        let mut g = shared.lock();
+        let lvl = &mut g.settings.log_level;
+        ui.horizontal(|ui| {
+            for (label, val) in [
+                ("E", LogFilterLevel::Error),
+                ("W", LogFilterLevel::Warn),
+                ("I", LogFilterLevel::Info),
+                ("D", LogFilterLevel::Debug),
+            ] {
+                let selected = *lvl == val;
+                let fill = if selected {
+                    Color32::from_rgb(60, 90, 140)
+                } else {
+                    Color32::from_rgb(32, 38, 48)
+                };
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new(label)
+                                .size(11.0)
+                                .color(Color32::WHITE),
+                        )
+                        .fill(fill)
+                        .rounding(4.0)
+                        .min_size(Vec2::new(36.0, 24.0)),
+                    )
+                    .clicked()
+                {
+                    *lvl = val;
+                }
+            }
+        });
+    }
+
+    ui.add_space(10.0);
+    ui.label(
+        RichText::new("Active engine")
+            .size(11.0)
+            .color(Color32::from_rgb(130, 140, 155)),
+    );
+    {
+        let mut g = shared.lock();
+        let eng = &mut g.settings.active_engine;
+        for name in ["auto", "unity", "adobe_air", "main"] {
+            let selected = eng.as_str() == name;
+            let fill = if selected {
+                Color32::from_rgb(90, 70, 40)
+            } else {
+                Color32::from_rgb(32, 38, 48)
+            };
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new(name)
+                            .size(11.0)
+                            .color(Color32::from_rgb(220, 210, 180)),
+                    )
+                    .fill(fill)
+                    .rounding(4.0)
+                    .min_size(Vec2::new(ui.available_width(), 24.0)),
+                )
+                .clicked()
+            {
+                *eng = name.to_string();
+            }
+        }
+    }
+
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new("sailfish · Pixel 1\n1080×1920 · 441 ppi")
+            .size(10.0)
+            .color(Color32::from_rgb(90, 100, 115)),
+    );
+}
+
+fn truncate_name(name: &str, max: usize) -> String {
+    if name.len() <= max {
+        name.to_string()
+    } else {
+        format!("{}…", &name[..max.saturating_sub(1)])
     }
 }
 
@@ -169,6 +455,7 @@ fn launch_apk(shared: &SharedUi, path: &str, name: &str) {
     };
     g.loading_progress = 0.0;
     g.loading_status = "Preparing…".into();
+    g.settings.show_settings = false;
 }
 
 fn register_and_launch(shared: &SharedUi, path: &str, name: &str) {
@@ -257,17 +544,4 @@ fn rescan() -> Vec<ApkEntry> {
         }
     }
     list
-}
-
-fn estimate_rss_mb() -> f32 {
-    // Lightweight estimate; platform-specific counters can replace later
-    #[cfg(windows)]
-    {
-        // Approximate via working set is OS-specific; show a stable placeholder
-        64.0
-    }
-    #[cfg(not(windows))]
-    {
-        64.0
-    }
 }
