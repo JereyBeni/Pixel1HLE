@@ -1,4 +1,4 @@
-//! Pixel1HLE – GUI entry point (no CLI required)
+//! Pixel1HLE – pure GUI entry (double-click the .exe)
 
 use log::info;
 use pixel1_translator::logging;
@@ -6,9 +6,8 @@ use pixel1_translator::Pixel1Translator;
 use std::path::PathBuf;
 
 fn main() {
-    // Logs dir next to the executable / cwd
     let log_dir = PathBuf::from("logs");
-    let _log_state = logging::HleLogger::init(&log_dir);
+    let _log_state = logging::init(&log_dir);
 
     info!(target: "hle", "=== Pixel1HLE GUI boot ===");
     info!(target: "hle", "Crash reports → logs/crash_*.txt");
@@ -18,17 +17,15 @@ fn main() {
     let rt = match Pixel1Translator::new("config/pixel1-sailfish.yaml") {
         Ok(rt) => rt,
         Err(e) => {
-            // Also write a fatal file so GUI-less failures leave a trace
             let _ = std::fs::create_dir_all(&log_dir);
             let msg = format!("FATAL boot error: {e}\n");
             let _ = std::fs::write(log_dir.join("boot_fatal.txt"), &msg);
             eprintln!("{msg}");
-            // MessageBox-style: on Windows we could use a dialog; for now keep stderr + file
             std::process::exit(1);
         }
     };
 
-    info!(target: "hle", "Launching GUI (AppPicker → Boot → Loading → Game)");
+    info!(target: "hle", "Launching GUI window…");
     if let Err(e) = rt.run_ui() {
         let msg = format!("UI loop error: {e}\n");
         let _ = std::fs::write(log_dir.join("ui_fatal.txt"), &msg);

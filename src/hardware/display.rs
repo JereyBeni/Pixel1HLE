@@ -1,15 +1,14 @@
-//! Display surface + Glow / Glutin + egui state machine
-//! Compatible with egui_glow 0.29 / winit 0.30 ApplicationHandler.
+//! Display surface + Glow / Glutin + egui state machine + terminal
 
 use crate::error::{Pixel1Error, Result};
-use crate::ui::{AppPicker, BootAnimation, EmulatorState, LoadingScreen, SharedUi};
+use crate::logging;
+use crate::ui::{AppPicker, BootAnimation, EmulatorState, LoadingScreen, SharedUi, TerminalPanel};
 use glow::HasContext;
 use log::{info, warn};
 use once_cell::sync::OnceCell;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Global glow context for the GLES bridge (set once the window is created).
 pub static GL_CONTEXT: OnceCell<Arc<glow::Context>> = OnceCell::new();
 
 pub fn with_gl<F, R>(f: F) -> Option<R>
@@ -28,7 +27,7 @@ pub struct DisplaySurface {
 
 impl DisplaySurface {
     pub fn new(width: u32, height: u32, refresh_hz: u32, ui_shared: SharedUi) -> Result<Self> {
-        info!(target: "hle::display", "Display: {width}x{height} @{refresh_hz}Hz (GL created on resume)");
+        info!(target: "hle::display", "Display: {width}x{height} @{refresh_hz}Hz (GL on resume)");
         Ok(Self {
             width,
             height,
@@ -146,9 +145,25 @@ impl winit::application::ApplicationHandler for AppState {
             return;
         };
 
+        // Toggle terminal with backtick
+        if let winit::event::WindowEvent::KeyboardInput {
+            event: key_event, ..
+        } = &event
+        {
+            if key_event.state == winit::event::ElementState::Pressed {
+                if let winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Backquote) =
+                    key_event.physical_key
+                {
+                    let mut g = self.ui_shared.lock();
+                    g.terminal_open = !g.terminal_open;
+                    info!(target: "hle::display", "Terminal {}", if g.terminal_open { "shown" } else { "hidden" });
+                }
+            }
+        }
+
         let is_ui = {
             let g = self.ui_shared.lock();
-            !matches!(g.state, EmulatorState::GameRunning { .. })
+            !matches!(g.state, EmulatorState::GameRunning { .. }) || g.terminal_open
         };
 
         if is_ui {
@@ -164,7 +179,10 @@ impl winit::application::ApplicationHandler for AppState {
             }
             winit::event::WindowEvent::RedrawRequested => {
                 let time = self.start.elapsed().as_secs_f64();
-                let state = self.ui_shared.lock().state.clone();
+                let (state, terminal_open) = {
+                    let g = self.ui_shared.lock();
+                    (g.state.clone(), g.terminal_open)
+                };
 
                 if let EmulatorState::BootAnimation { apk_name } = &state {
                     if self.boot_timer.is_none() {
@@ -186,24 +204,33 @@ impl winit::application::ApplicationHandler for AppState {
                     gl.clear(glow::COLOR_BUFFER_BIT);
                 }
 
-                match state {
-                    EmulatorState::GameRunning { .. } => {}
-                    _ => {
-                        let ui_shared = self.ui_shared.clone();
-                        egui_glow.run(&gl_window.window, |ctx| {
-                            match &ui_shared.lock().state {
-                                EmulatorState::AppPicker => AppPicker::ui(ctx, &ui_shared),
-                                EmulatorState::BootAnimation { .. } => {
-                                    BootAnimation::ui(ctx, &ui_shared, time)
-                                }
-                                EmulatorState::ApkLoading { .. } => {
-                                    LoadingScreen::ui(ctx, &ui_shared)
-                                }
-                                EmulatorState::GameRunning { .. } => {}
+                // Always paint UI layers when not pure-game, or when terminal is open
+                let paint_ui = !matches!(state, EmulatorState::GameRunning { .. }) || terminal_open;
+
+                if paint_ui {
+                    let ui_shared = self.ui_shared.clone();
+                    egui_glow.run(&gl_window.window, |ctx| {
+                        // Terminal (bottom dock)
+                        if let Some(log_state) = logging::global_log_state() {
+                            let mut open = ui_shared.lock().terminal_open;
+                            TerminalPanel::ui(ctx, log_state, &mut open);
+                            ui_shared.lock().terminal_open = open;
+                        }
+
+                        match &ui_shared.lock().state {
+                            EmulatorState::AppPicker => AppPicker::ui(ctx, &ui_shared),
+                            EmulatorState::BootAnimation { .. } => {
+                                BootAnimation::ui(ctx, &ui_shared, time)
                             }
-                        });
-                        egui_glow.paint(&gl_window.window);
-                    }
+                            EmulatorState::ApkLoading { .. } => {
+                                LoadingScreen::ui(ctx, &ui_shared)
+                            }
+                            EmulatorState::GameRunning { .. } => {
+                                // game owns the canvas; terminal may still overlay
+                            }
+                        }
+                    });
+                    egui_glow.paint(&gl_window.window);
                 }
 
                 use glutin::prelude::GlSurface;
@@ -268,7 +295,6 @@ fn create_display(
         .with_context_api(ContextApi::OpenGl(Some(Version::new(4, 5))))
         .build(Some(raw_handle));
 
-    // glutin marks these as unsafe – isolate the FFI boundary here
     let not_current = unsafe {
         gl_display
             .create_context(&gl_config, &context_attribs)
