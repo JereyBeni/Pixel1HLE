@@ -24,9 +24,6 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # ─────────────────────────────────────────────────────────────
-  # Windows executable
-  # ─────────────────────────────────────────────────────────────
   windows:
     name: Windows (x86_64)
     runs-on: windows-latest
@@ -62,9 +59,6 @@ jobs:
           path: dist/pixel1-translator-windows-x86_64.zip
           retention-days: 7
 
-  # ─────────────────────────────────────────────────────────────
-  # Real Android APK (Gradle)
-  # ─────────────────────────────────────────────────────────────
   android-apk:
     name: Android APK
     runs-on: ubuntu-latest
@@ -80,37 +74,63 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Accept licenses
+      - name: Accept Android SDK licenses (non-interactive)
         run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+          set -e
+          ANDROID_HOME="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          mkdir -p "$ANDROID_HOME/licenses"
+          # Standard Google SDK license hashes (non-interactive accept)
+          printf '%s\n' \
+            "24333f8a63b6825ea9c5514f83c2829b004d1fee" \
+            > "$ANDROID_HOME/licenses/android-sdk-license"
+          printf '%s\n' \
+            "84831b9409646161dcb09b76f32bff1f726404cc" \
+            > "$ANDROID_HOME/licenses/android-sdk-preview-license"
+          printf '%s\n' \
+            "d56f5187474654efc6090417231d4d5b11d0d6f0" \
+            "24333f8a63b6825ea9c5514f83c2829b004d1fee" \
+            > "$ANDROID_HOME/licenses/android-sdk-arm-dbt-license"
+          printf '%s\n' \
+            "33b6a2b64607f11b759f320ef9dff4ae5c47d97a" \
+            > "$ANDROID_HOME/licenses/google-gdk-license"
+          printf '%s\n' \
+            "e9acab5b5fbb560a72cfaecce8946896db486400" \
+            > "$ANDROID_HOME/licenses/mips-android-sysimage-license"
+          # Install platform + build-tools without prompting
+          sdkmanager --install "platforms;android-34" "build-tools;34.0.0" "platform-tools" || \
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+              "platforms;android-34" "build-tools;34.0.0" "platform-tools" || true
 
       - name: Copy sailfish profile into APK assets
         run: |
           mkdir -p android/app/src/main/assets
           cp config/pixel1-sailfish.yaml android/app/src/main/assets/
 
-      - name: Setup Gradle wrapper
-        working-directory: android
-        run: |
-          gradle wrapper --gradle-version 8.5 || true
-          if [ ! -f gradlew ]; then
-            # bootstrap wrapper if gradle not installed globally
-            curl -sL https://services.gradle.org/distributions/gradle-8.5-bin.zip -o /tmp/gradle.zip
-            sudo unzip -q /tmp/gradle.zip -d /opt
-            /opt/gradle-8.5/bin/gradle wrapper --gradle-version 8.5
-          fi
-          chmod +x gradlew
+      - name: Setup Gradle 8.5
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.5'
 
       - name: Build debug APK
         working-directory: android
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
         run: |
+          # Generate wrapper then build
+          gradle wrapper --gradle-version 8.5
+          chmod +x gradlew
           ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Collect APK
         run: |
           mkdir -p dist
           APK=$(find android/app/build/outputs/apk -name "*.apk" | head -n1)
+          if [ -z "$APK" ]; then
+            echo "ERROR: no APK produced"
+            find android -name "*.apk" || true
+            exit 1
+          fi
           echo "Found APK: $APK"
           cp "$APK" dist/pixel1-hle.apk
           ls -lh dist/pixel1-hle.apk
@@ -121,9 +141,6 @@ jobs:
           path: dist/pixel1-hle.apk
           retention-days: 14
 
-  # ─────────────────────────────────────────────────────────────
-  # Publish release (tags / manual only)
-  # ─────────────────────────────────────────────────────────────
   release:
     name: Publish Release
     needs: [windows, android-apk]
@@ -169,7 +186,6 @@ jobs:
             - `pixel1-translator-windows-x86_64.zip` → run `pixel1-translator.exe`
 
             ### Android APK
-            - Install `pixel1-hle.apk` (debug build)
+            - Install `pixel1-hle.apk`
             - Package: `com.pixel.hle`
-            - Use **Import ya!** to pick guest APKs
-            - Data: `Android/data/com.pixel.hle/` (app external files dir)
+            - **Import ya!** picks guest APKs
