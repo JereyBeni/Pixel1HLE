@@ -44,12 +44,10 @@ pub struct Pixel1Translator {
 impl Pixel1Translator {
     pub fn new(profile_path: &str) -> Result<Self> {
         info!(target: "hle", "Pixel1Translator: booting sailfish HLE + UI");
-
         let profile_str = std::fs::read_to_string(profile_path).unwrap_or_else(|_| {
             info!(target: "hle", "Profile file missing – using embedded sailfish defaults");
             profile_embed::SAILFISH_YAML.to_string()
         });
-
         Self::from_yaml(&profile_str)
     }
 
@@ -63,7 +61,6 @@ impl Pixel1Translator {
 
         let cpu = Arc::new(CpuRuntime::new());
         let syscall = Arc::new(SyscallTranslator::new());
-
         hardware::gles_bridge::register_gles_symbols(&cpu);
 
         let allowlist = if root.permissions.allowlist.is_empty() {
@@ -88,6 +85,15 @@ impl Pixel1Translator {
     }
 
     pub fn run_ui(self) -> Result<()> {
+        self.run_ui_with_event_loop(None)
+    }
+
+    /// `android_app` is Some only on Android NativeActivity
+    pub fn run_ui_with_event_loop(
+        self,
+        #[cfg(target_os = "android")] android_app: Option<android_activity::AndroidApp>,
+        #[cfg(not(target_os = "android"))] _android_app: Option<()>,
+    ) -> Result<()> {
         let width = self.hw.profile.display.width;
         let height = self.hw.profile.display.height;
         let ui_shared = self.hw.ui_shared.clone();
@@ -112,35 +118,30 @@ impl Pixel1Translator {
                 };
 
                 if should_load {
-                    info!(target: "hle::display", "Background loader starting for {name}");
+                    info!(target: "hle::display", "Background loader for {name}");
                     let executor = ApkElfExecutor::new(&path).with_ui(ui_clone.clone());
                     let candidates =
                         ["libunity.so", "libminecraftpe.so", "libmain.so", "libgame.so"];
                     let mut loaded = false;
                     for eng in candidates {
-                        match executor.bootstrap_engine(eng) {
-                            Ok(lib) => {
-                                info!(target: "hle::linker", "Loaded {eng} @ 0x{:x}", lib.guest_base);
-                                cpu_clone.attach_linker(executor);
-                                hardware::display::DisplaySurface::set_state(
-                                    &ui_clone,
-                                    EmulatorState::GameRunning {
-                                        apk_name: name.clone(),
-                                    },
-                                );
-                                loaded = true;
-                                break;
-                            }
-                            Err(e) => {
-                                log::debug!(target: "hle::linker", "{eng} not found: {e}");
-                            }
+                        if let Ok(lib) = executor.bootstrap_engine(eng) {
+                            info!(target: "hle::linker", "Loaded {eng} @ 0x{:x}", lib.guest_base);
+                            cpu_clone.attach_linker(executor);
+                            hardware::display::DisplaySurface::set_state(
+                                &ui_clone,
+                                EmulatorState::GameRunning {
+                                    apk_name: name.clone(),
+                                },
+                            );
+                            loaded = true;
+                            break;
                         }
                     }
                     if !loaded {
                         hardware::display::DisplaySurface::update_loading_progress(
                             &ui_clone,
                             1.0,
-                            "No native engine found – demo mode",
+                            "No native engine – demo mode",
                         );
                         std::thread::sleep(std::time::Duration::from_millis(800));
                         hardware::display::DisplaySurface::set_state(
@@ -153,7 +154,15 @@ impl Pixel1Translator {
             }
         });
 
-        hardware::display::run_ui_loop(ui_shared, width, height)
+        #[cfg(target_os = "android")]
+        {
+            hardware::display::run_ui_loop_android(ui_shared, width, height, android_app)
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = _android_app;
+            hardware::display::run_ui_loop(ui_shared, width, height)
+        }
     }
 
     pub fn load_and_run_apk(
@@ -166,39 +175,9 @@ impl Pixel1Translator {
         self.cpu.attach_linker(executor);
         Ok(lib)
     }
-
-    pub fn demo_unity_graphics(&self) {
-        self.cpu.demo_unity_graphics_bootstrap();
-    }
-
-    pub fn example_cascade_get_window_service(&self) -> Result<Option<u32>> {
-        self.binder.get_system_service("WINDOW_SERVICE")
-    }
 }
 
-/// Shared boot used by desktop main and Android NativeActivity
-pub fn boot_and_run() -> Result<()> {
-    let log_dir = {
-        #[cfg(target_os = "android")]
-        {
-            // App-private files dir is set by the activity; fall back to /data/local/tmp
-            std::path::PathBuf::from("/data/data/com.pixel.hle/files/logs")
-        }
-        #[cfg(not(target_os = "android"))]
-        {
-            std::path::PathBuf::from("logs")
-        }
-    };
-    let _ = std::fs::create_dir_all(&log_dir);
-    let _ = logging::init(&log_dir);
-
-    info!(target: "hle", "=== Pixel1HLE boot (shared Rust path) ===");
-
-    let rt = Pixel1Translator::from_yaml(profile_embed::SAILFISH_YAML)?;
-    rt.run_ui()
-}
-
-// ─── Android NativeActivity entry (same Rust UI stack as Windows) ───────────
+/// Android NativeActivity entry – **same Rust UI / HLE as Windows**
 #[cfg(target_os = "android")]
 #[no_mangle]
 fn android_main(app: android_activity::AndroidApp) {
@@ -208,12 +187,14 @@ fn android_main(app: android_activity::AndroidApp) {
             .with_tag("Pixel1HLE"),
     );
 
-    // Store the AndroidApp so winit can pick it up
-    winit::platform::android::activity::android_main(app);
+    log::info!(target: "hle", "android_main – pure Rust NativeActivity");
 
-    // Note: winit 0.30 android uses EventLoop via android_main hook.
-    // Our ApplicationHandler runs through the same display module.
-    if let Err(e) = boot_and_run() {
-        log::error!(target: "hle", "Android boot failed: {e}");
+    match Pixel1Translator::from_yaml(profile_embed::SAILFISH_YAML) {
+        Ok(rt) => {
+            if let Err(e) = rt.run_ui_with_event_loop(Some(app)) {
+                log::error!(target: "hle", "UI failed: {e}");
+            }
+        }
+        Err(e) => log::error!(target: "hle", "Boot failed: {e}"),
     }
 }

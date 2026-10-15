@@ -1,4 +1,4 @@
-//! Display surface + Glow / Glutin + egui state machine + terminal
+//! Display surface + Glow / Glutin + egui (desktop + Android)
 
 use crate::error::{Pixel1Error, Result};
 use crate::logging;
@@ -27,7 +27,7 @@ pub struct DisplaySurface {
 
 impl DisplaySurface {
     pub fn new(width: u32, height: u32, refresh_hz: u32, ui_shared: SharedUi) -> Result<Self> {
-        info!(target: "hle::display", "Display: {width}x{height} @{refresh_hz}Hz (GL on resume)");
+        info!(target: "hle::display", "Display: {width}x{height} @{refresh_hz}Hz");
         Ok(Self {
             width,
             height,
@@ -44,14 +44,8 @@ impl DisplaySurface {
 
     pub fn set_state(shared: &SharedUi, state: EmulatorState) {
         let mut g = shared.lock();
-        log::info!(target: "hle::display", "State → {:?}", state);
+        info!(target: "hle::display", "State → {:?}", state);
         g.state = state;
-    }
-
-    pub fn inject_touch(&self, slot: u32, x_norm: f32, y_norm: f32, down: bool) {
-        let x = (x_norm * self.width as f32) as u32;
-        let y = (y_norm * self.height as f32) as u32;
-        log::trace!(target: "hle::display", "Touch slot={slot} ({x},{y}) down={down}");
     }
 }
 
@@ -92,41 +86,23 @@ impl winit::application::ApplicationHandler for AppState {
         if self.gl_window.is_some() {
             return;
         }
-
         info!(target: "hle::display", "resumed – creating GL window");
-
         match create_display(event_loop, self.width, self.height) {
             Ok((gl_window, gl)) => {
                 let gl = Arc::new(gl);
-
-                if GL_CONTEXT.set(Arc::clone(&gl)).is_err() {
-                    warn!(target: "hle::display", "GL_CONTEXT already set");
-                }
-
-                let egui_glow = egui_glow::EguiGlow::new(
-                    event_loop,
-                    Arc::clone(&gl),
-                    None,
-                    None,
-                    false,
-                );
-
+                let _ = GL_CONTEXT.set(Arc::clone(&gl));
+                let egui_glow =
+                    egui_glow::EguiGlow::new(event_loop, Arc::clone(&gl), None, None, false);
                 {
                     let mut g = self.ui_shared.lock();
                     g.available_apks = scan_apks();
-                    info!(target: "hle::display", "Found {} APK(s)", g.available_apks.len());
                 }
-
                 self.gl = Some(gl);
                 self.egui_glow = Some(egui_glow);
                 self.gl_window = Some(gl_window);
             }
             Err(e) => {
-                log::error!(target: "hle::display", "Failed to create display: {e}");
-                let _ = std::fs::write(
-                    "logs/ui_fatal.txt",
-                    format!("Failed to create OpenGL window: {e}\n"),
-                );
+                log::error!(target: "hle::display", "display create failed: {e}");
                 event_loop.exit();
             }
         }
@@ -166,7 +142,6 @@ impl winit::application::ApplicationHandler for AppState {
             let g = self.ui_shared.lock();
             !matches!(g.state, EmulatorState::GameRunning { .. }) || g.terminal_open
         };
-
         if is_ui {
             let repaint = egui_glow.on_window_event(&gl_window.window, &event);
             if repaint.repaint {
@@ -175,13 +150,9 @@ impl winit::application::ApplicationHandler for AppState {
         }
 
         match event {
-            winit::event::WindowEvent::CloseRequested => {
-                event_loop.exit();
-            }
+            winit::event::WindowEvent::CloseRequested => event_loop.exit(),
             winit::event::WindowEvent::RedrawRequested => {
                 let time = self.start.elapsed().as_secs_f64();
-
-                // Snapshot state WITHOUT holding the lock into nested UI
                 let (state, terminal_open) = {
                     let g = self.ui_shared.lock();
                     (g.state.clone(), g.terminal_open)
@@ -216,18 +187,12 @@ impl winit::application::ApplicationHandler for AppState {
 
                 if paint_ui {
                     let ui_shared = self.ui_shared.clone();
-                    // CRITICAL: never hold ui_shared.lock() across AppPicker/BootAnimation calls
                     egui_glow.run(&gl_window.window, |ctx| {
                         if let Some(log_state) = logging::global_log_state() {
-                            let mut open = {
-                                let g = ui_shared.lock();
-                                g.terminal_open
-                            };
+                            let mut open = ui_shared.lock().terminal_open;
                             TerminalPanel::ui(ctx, log_state, &mut open);
                             ui_shared.lock().terminal_open = open;
                         }
-
-                        // Clone state, drop lock, then render
                         let st = ui_shared.lock().state.clone();
                         match st {
                             EmulatorState::AppPicker => AppPicker::ui(ctx, &ui_shared),
@@ -272,18 +237,15 @@ fn create_display(
     use winit::dpi::PhysicalSize;
     use winit::window::WindowAttributes;
 
-    // Cap window to something reasonable on small monitors
-    let width = width.min(1920).max(640);
-    let height = height.min(1080).max(360);
+    let width = width.min(1920).max(320);
+    let height = height.min(1080).max(240);
 
     let window_attrs = WindowAttributes::default()
         .with_inner_size(PhysicalSize::new(width, height))
         .with_title("Pixel1HLE – sailfish")
         .with_resizable(true);
 
-    let template = ConfigTemplateBuilder::new()
-        .with_alpha_size(8)
-        .with_transparency(false);
+    let template = ConfigTemplateBuilder::new().with_alpha_size(8);
     let display_builder = DisplayBuilder::new().with_window_attributes(Some(window_attrs));
 
     let (window, gl_config) = display_builder
@@ -307,16 +269,19 @@ fn create_display(
         .as_raw();
     let gl_display = gl_config.display();
 
-    // Fallback chain: GL 4.5 → 3.3 → GLES 3.0 → GLES 2.0 → default
-    let attempts: Vec<ContextAttributesBuilder> = vec![
-        ContextAttributesBuilder::new().with_context_api(ContextApi::OpenGl(Some(Version::new(4, 5)))),
-        ContextAttributesBuilder::new().with_context_api(ContextApi::OpenGl(Some(Version::new(3, 3)))),
-        ContextAttributesBuilder::new().with_context_api(ContextApi::Gles(Some(Version::new(3, 0)))),
-        ContextAttributesBuilder::new().with_context_api(ContextApi::Gles(Some(Version::new(2, 0)))),
+    let attempts = [
+        ContextAttributesBuilder::new()
+            .with_context_api(ContextApi::OpenGl(Some(Version::new(4, 5)))),
+        ContextAttributesBuilder::new()
+            .with_context_api(ContextApi::OpenGl(Some(Version::new(3, 3)))),
+        ContextAttributesBuilder::new()
+            .with_context_api(ContextApi::Gles(Some(Version::new(3, 0)))),
+        ContextAttributesBuilder::new()
+            .with_context_api(ContextApi::Gles(Some(Version::new(2, 0)))),
         ContextAttributesBuilder::new(),
     ];
 
-    let mut last_err = String::from("no context attempt succeeded");
+    let mut last_err = String::from("no context");
     let mut not_current = None;
     for builder in attempts {
         let attribs = builder.build(Some(raw_handle));
@@ -327,7 +292,7 @@ fn create_display(
             }
             Err(e) => {
                 last_err = format!("{e}");
-                warn!(target: "hle::display", "GL context attempt failed: {e}");
+                warn!(target: "hle::display", "GL attempt failed: {e}");
             }
         }
     }
@@ -335,18 +300,15 @@ fn create_display(
         .ok_or_else(|| Pixel1Error::Display(format!("create_context: {last_err}")))?;
 
     let attrs = GlWindow::build_surface_attributes(&window, Default::default())
-        .map_err(|e| Pixel1Error::Display(format!("surface attrs: {e}")))?;
-
+        .map_err(|e| Pixel1Error::Display(format!("surface: {e}")))?;
     let gl_surface = unsafe {
         gl_display
             .create_window_surface(&gl_config, &attrs)
-            .map_err(|e| Pixel1Error::Display(format!("create_window_surface: {e}")))?
+            .map_err(|e| Pixel1Error::Display(format!("window_surface: {e}")))?
     };
-
     let gl_context = not_current
         .make_current(&gl_surface)
         .map_err(|e| Pixel1Error::Display(format!("make_current: {e}")))?;
-
     let _ = gl_surface.set_swap_interval(
         &gl_context,
         SwapInterval::Wait(std::num::NonZeroU32::new(1).unwrap()),
@@ -358,13 +320,9 @@ fn create_display(
             gl_display.get_proc_address(&c) as *const _
         })
     };
-
     unsafe {
         gl.viewport(0, 0, width as i32, height as i32);
-        gl.clear_color(0.05, 0.05, 0.08, 1.0);
     }
-
-    info!(target: "hle::display", "OpenGL context ready");
 
     Ok((
         GlutinWindowContext {
@@ -377,17 +335,39 @@ fn create_display(
 }
 
 pub fn run_ui_loop(ui_shared: SharedUi, width: u32, height: u32) -> Result<()> {
-    info!(target: "hle::display", "Starting UI event loop (sailfish {width}x{height})");
-
+    info!(target: "hle::display", "UI loop desktop {width}x{height}");
     let event_loop = winit::event_loop::EventLoop::new()
         .map_err(|e| Pixel1Error::Display(e.to_string()))?;
-
     let mut app = AppState::new(ui_shared, width, height);
-
     event_loop
         .run_app(&mut app)
-        .map_err(|e| Pixel1Error::Display(format!("event loop: {e}")))?;
+        .map_err(|e| Pixel1Error::Display(format!("{e}")))?;
+    Ok(())
+}
 
+#[cfg(target_os = "android")]
+pub fn run_ui_loop_android(
+    ui_shared: SharedUi,
+    width: u32,
+    height: u32,
+    android_app: Option<android_activity::AndroidApp>,
+) -> Result<()> {
+    use winit::platform::android::EventLoopBuilderExtAndroid;
+
+    info!(target: "hle::display", "UI loop Android NativeActivity {width}x{height}");
+    let app = android_app.ok_or_else(|| {
+        Pixel1Error::Display("AndroidApp handle missing".into())
+    })?;
+
+    let event_loop = winit::event_loop::EventLoop::builder()
+        .with_android_app(app)
+        .build()
+        .map_err(|e| Pixel1Error::Display(e.to_string()))?;
+
+    let mut state = AppState::new(ui_shared, width, height);
+    event_loop
+        .run_app(&mut state)
+        .map_err(|e| Pixel1Error::Display(format!("{e}")))?;
     Ok(())
 }
 
@@ -396,9 +376,13 @@ fn scan_apks() -> Vec<crate::ui::ApkEntry> {
     let mut roots = vec![
         std::path::PathBuf::from("."),
         std::path::PathBuf::from("apps"),
-        std::path::PathBuf::from("apks"),
     ];
-    // Also scan next to the executable
+    #[cfg(target_os = "android")]
+    {
+        roots.push(std::path::PathBuf::from("/sdcard/Download"));
+        roots.push(std::path::PathBuf::from("/storage/emulated/0/Download"));
+        roots.push(std::path::PathBuf::from("/data/data/com.pixel.hle/files/apps"));
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             roots.push(dir.to_path_buf());
@@ -419,13 +403,11 @@ fn scan_apks() -> Vec<crate::ui::ApkEntry> {
                         .and_then(|n| n.to_str())
                         .unwrap_or("unknown")
                         .to_string();
-                    if !list.iter().any(|x: &crate::ui::ApkEntry| x.path == path.to_string_lossy()) {
-                        list.push(crate::ui::ApkEntry {
-                            path: path.to_string_lossy().into(),
-                            name,
-                            size_mb,
-                        });
-                    }
+                    list.push(crate::ui::ApkEntry {
+                        path: path.to_string_lossy().into(),
+                        name,
+                        size_mb,
+                    });
                 }
             }
         }

@@ -1,4 +1,4 @@
-//! Software-driven audio pipeline mimicking 3.5 mm jack + speaker
+//! Software-driven audio pipeline (stub – works without cpal on Android)
 
 use crate::error::Result;
 use log::info;
@@ -10,7 +10,7 @@ pub struct AudioPipeline {
 
 impl AudioPipeline {
     pub fn new() -> Result<Self> {
-        info!("Audio: initialising software pipeline (44.1 kHz stereo)");
+        info!("Audio: software pipeline stub (44.1 kHz stereo)");
         Ok(Self {
             sample_rate: 44100,
             channels: 2,
