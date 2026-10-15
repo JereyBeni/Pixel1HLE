@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.Pixel1HLE" parent="android:Theme.Material.NoActionBar">
+    <!-- DeviceDefault avoids Material dependency crashes on some OEMs -->
+    <style name="Theme.Pixel1HLE" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">#121218</item>
         <item name="android:statusBarColor">#121218</item>
         <item name="android:navigationBarColor">#121218</item>
-        <item name="android:windowBackground">#121218</item>
     </style>
 </resources>

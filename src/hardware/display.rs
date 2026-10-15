@@ -40,7 +40,6 @@ impl DisplaySurface {
         let mut g = shared.lock();
         g.loading_progress = progress.clamp(0.0, 1.0);
         g.loading_status = status.to_string();
-        log::debug!(target: "hle::display", "Loading {:.0}% – {}", progress * 100.0, status);
     }
 
     pub fn set_state(shared: &SharedUi, state: EmulatorState) {
@@ -124,6 +123,10 @@ impl winit::application::ApplicationHandler for AppState {
             }
             Err(e) => {
                 log::error!(target: "hle::display", "Failed to create display: {e}");
+                let _ = std::fs::write(
+                    "logs/ui_fatal.txt",
+                    format!("Failed to create OpenGL window: {e}\n"),
+                );
                 event_loop.exit();
             }
         }
@@ -145,7 +148,6 @@ impl winit::application::ApplicationHandler for AppState {
             return;
         };
 
-        // Toggle terminal with backtick
         if let winit::event::WindowEvent::KeyboardInput {
             event: key_event, ..
         } = &event
@@ -156,7 +158,6 @@ impl winit::application::ApplicationHandler for AppState {
                 {
                     let mut g = self.ui_shared.lock();
                     g.terminal_open = !g.terminal_open;
-                    info!(target: "hle::display", "Terminal {}", if g.terminal_open { "shown" } else { "hidden" });
                 }
             }
         }
@@ -179,6 +180,8 @@ impl winit::application::ApplicationHandler for AppState {
             }
             winit::event::WindowEvent::RedrawRequested => {
                 let time = self.start.elapsed().as_secs_f64();
+
+                // Snapshot state WITHOUT holding the lock into nested UI
                 let (state, terminal_open) = {
                     let g = self.ui_shared.lock();
                     (g.state.clone(), g.terminal_open)
@@ -188,7 +191,11 @@ impl winit::application::ApplicationHandler for AppState {
                     if self.boot_timer.is_none() {
                         self.boot_timer = Some(Instant::now());
                     }
-                    if self.boot_timer.unwrap().elapsed().as_secs_f32() > 2.2 {
+                    if self
+                        .boot_timer
+                        .map(|t| t.elapsed().as_secs_f32() > 2.2)
+                        .unwrap_or(false)
+                    {
                         DisplaySurface::set_state(
                             &self.ui_shared,
                             EmulatorState::ApkLoading {
@@ -200,24 +207,29 @@ impl winit::application::ApplicationHandler for AppState {
                 }
 
                 unsafe {
-                    gl.clear_color(0.0, 0.0, 0.0, 1.0);
+                    gl.clear_color(0.05, 0.05, 0.08, 1.0);
                     gl.clear(glow::COLOR_BUFFER_BIT);
                 }
 
-                // Always paint UI layers when not pure-game, or when terminal is open
-                let paint_ui = !matches!(state, EmulatorState::GameRunning { .. }) || terminal_open;
+                let paint_ui =
+                    !matches!(state, EmulatorState::GameRunning { .. }) || terminal_open;
 
                 if paint_ui {
                     let ui_shared = self.ui_shared.clone();
+                    // CRITICAL: never hold ui_shared.lock() across AppPicker/BootAnimation calls
                     egui_glow.run(&gl_window.window, |ctx| {
-                        // Terminal (bottom dock)
                         if let Some(log_state) = logging::global_log_state() {
-                            let mut open = ui_shared.lock().terminal_open;
+                            let mut open = {
+                                let g = ui_shared.lock();
+                                g.terminal_open
+                            };
                             TerminalPanel::ui(ctx, log_state, &mut open);
                             ui_shared.lock().terminal_open = open;
                         }
 
-                        match &ui_shared.lock().state {
+                        // Clone state, drop lock, then render
+                        let st = ui_shared.lock().state.clone();
+                        match st {
                             EmulatorState::AppPicker => AppPicker::ui(ctx, &ui_shared),
                             EmulatorState::BootAnimation { .. } => {
                                 BootAnimation::ui(ctx, &ui_shared, time)
@@ -225,9 +237,7 @@ impl winit::application::ApplicationHandler for AppState {
                             EmulatorState::ApkLoading { .. } => {
                                 LoadingScreen::ui(ctx, &ui_shared)
                             }
-                            EmulatorState::GameRunning { .. } => {
-                                // game owns the canvas; terminal may still overlay
-                            }
+                            EmulatorState::GameRunning { .. } => {}
                         }
                     });
                     egui_glow.paint(&gl_window.window);
@@ -262,12 +272,18 @@ fn create_display(
     use winit::dpi::PhysicalSize;
     use winit::window::WindowAttributes;
 
+    // Cap window to something reasonable on small monitors
+    let width = width.min(1920).max(640);
+    let height = height.min(1080).max(360);
+
     let window_attrs = WindowAttributes::default()
         .with_inner_size(PhysicalSize::new(width, height))
         .with_title("Pixel1HLE – sailfish")
-        .with_resizable(false);
+        .with_resizable(true);
 
-    let template = ConfigTemplateBuilder::new().with_alpha_size(8);
+    let template = ConfigTemplateBuilder::new()
+        .with_alpha_size(8)
+        .with_transparency(false);
     let display_builder = DisplayBuilder::new().with_window_attributes(Some(window_attrs));
 
     let (window, gl_config) = display_builder
@@ -280,7 +296,7 @@ fn create_display(
                         a
                     }
                 })
-                .unwrap()
+                .expect("no GL configs")
         })
         .map_err(|e| Pixel1Error::Display(format!("{e}")))?;
 
@@ -291,15 +307,32 @@ fn create_display(
         .as_raw();
     let gl_display = gl_config.display();
 
-    let context_attribs = ContextAttributesBuilder::new()
-        .with_context_api(ContextApi::OpenGl(Some(Version::new(4, 5))))
-        .build(Some(raw_handle));
+    // Fallback chain: GL 4.5 → 3.3 → GLES 3.0 → GLES 2.0 → default
+    let attempts: Vec<ContextAttributesBuilder> = vec![
+        ContextAttributesBuilder::new().with_context_api(ContextApi::OpenGl(Some(Version::new(4, 5)))),
+        ContextAttributesBuilder::new().with_context_api(ContextApi::OpenGl(Some(Version::new(3, 3)))),
+        ContextAttributesBuilder::new().with_context_api(ContextApi::Gles(Some(Version::new(3, 0)))),
+        ContextAttributesBuilder::new().with_context_api(ContextApi::Gles(Some(Version::new(2, 0)))),
+        ContextAttributesBuilder::new(),
+    ];
 
-    let not_current = unsafe {
-        gl_display
-            .create_context(&gl_config, &context_attribs)
-            .map_err(|e| Pixel1Error::Display(format!("create_context: {e}")))?
-    };
+    let mut last_err = String::from("no context attempt succeeded");
+    let mut not_current = None;
+    for builder in attempts {
+        let attribs = builder.build(Some(raw_handle));
+        match unsafe { gl_display.create_context(&gl_config, &attribs) } {
+            Ok(ctx) => {
+                not_current = Some(ctx);
+                break;
+            }
+            Err(e) => {
+                last_err = format!("{e}");
+                warn!(target: "hle::display", "GL context attempt failed: {e}");
+            }
+        }
+    }
+    let not_current = not_current
+        .ok_or_else(|| Pixel1Error::Display(format!("create_context: {last_err}")))?;
 
     let attrs = GlWindow::build_surface_attributes(&window, Default::default())
         .map_err(|e| Pixel1Error::Display(format!("surface attrs: {e}")))?;
@@ -321,14 +354,17 @@ fn create_display(
 
     let gl = unsafe {
         glow::Context::from_loader_function(|s| {
-            gl_display.get_proc_address(&std::ffi::CString::new(s).unwrap()) as *const _
+            let c = std::ffi::CString::new(s).unwrap_or_default();
+            gl_display.get_proc_address(&c) as *const _
         })
     };
 
     unsafe {
         gl.viewport(0, 0, width as i32, height as i32);
-        gl.clear_color(0.0, 0.0, 0.0, 1.0);
+        gl.clear_color(0.05, 0.05, 0.08, 1.0);
     }
+
+    info!(target: "hle::display", "OpenGL context ready");
 
     Ok((
         GlutinWindowContext {
@@ -357,8 +393,20 @@ pub fn run_ui_loop(ui_shared: SharedUi, width: u32, height: u32) -> Result<()> {
 
 fn scan_apks() -> Vec<crate::ui::ApkEntry> {
     let mut list = Vec::new();
-    for dir in [".", "apps", "apks"] {
-        if let Ok(entries) = std::fs::read_dir(dir) {
+    let mut roots = vec![
+        std::path::PathBuf::from("."),
+        std::path::PathBuf::from("apps"),
+        std::path::PathBuf::from("apks"),
+    ];
+    // Also scan next to the executable
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            roots.push(dir.to_path_buf());
+            roots.push(dir.join("apps"));
+        }
+    }
+    for dir in roots {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
             for e in entries.flatten() {
                 let path = e.path();
                 if path.extension().and_then(|s| s.to_str()) == Some("apk") {
@@ -371,11 +419,13 @@ fn scan_apks() -> Vec<crate::ui::ApkEntry> {
                         .and_then(|n| n.to_str())
                         .unwrap_or("unknown")
                         .to_string();
-                    list.push(crate::ui::ApkEntry {
-                        path: path.to_string_lossy().into(),
-                        name,
-                        size_mb,
-                    });
+                    if !list.iter().any(|x: &crate::ui::ApkEntry| x.path == path.to_string_lossy()) {
+                        list.push(crate::ui::ApkEntry {
+                            path: path.to_string_lossy().into(),
+                            name,
+                            size_mb,
+                        });
+                    }
                 }
             }
         }
