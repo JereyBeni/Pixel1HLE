@@ -2,27 +2,17 @@ name: Build & Release
 
 on:
   push:
-    branches:
-      - '**'
-    tags:
-      - 'v*'
+    branches: ['**']
+    tags: ['v*']
   pull_request:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Version tag to publish (e.g. v0.2.0)'
-        required: false
-        default: ''
 
 permissions:
   contents: write
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
-  # GitHub ubuntu runners ship a preinstalled Android SDK here
   ANDROID_HOME: /usr/local/lib/android/sdk
   ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
@@ -32,30 +22,19 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-
       - uses: Swatinem/rust-cache@v2
-
-      - name: Build release
-        run: cargo build --release --features loader
+      - run: cargo build --release --features "loader,desktop"
         env:
           RUSTFLAGS: "-C target-feature=+crt-static"
-
       - name: Package
         shell: pwsh
         run: |
           $Out = "dist/pixel1-translator-windows-x86_64"
-          New-Item -ItemType Directory -Force -Path "$Out/config","$Out/apps","$Out/fonts","$Out/assets","$Out/logs" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$Out/config","$Out/apps","$Out/logs" | Out-Null
           Copy-Item "target/release/pixel1-translator.exe" "$Out/"
           Copy-Item "config/pixel1-sailfish.yaml" "$Out/config/"
-          Set-Content "$Out/apps/README.txt" "Drop APKs here or use Import ya!"
-          $Version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "dev-$(Get-Date -Format yyyyMMdd-HHmm)" }
-          Set-Content "$Out/VERSION.txt" $Version
           Compress-Archive -Path "$Out/*" -DestinationPath "dist/pixel1-translator-windows-x86_64.zip" -Force
-
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x86_64
@@ -63,95 +42,67 @@ jobs:
           retention-days: 7
 
   android-apk:
-    name: Android APK
+    name: Android APK (Rust NativeActivity)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
 
-      - name: Accept Android licenses + ensure platform/build-tools
+      - name: Accept SDK licenses
         run: |
-          set -euo pipefail
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          ls -la "$ANDROID_HOME" || true
-
           mkdir -p "$ANDROID_HOME/licenses"
-          # Hash values required by sdkmanager (non-interactive)
-          cat > "$ANDROID_HOME/licenses/android-sdk-license" << 'EOF'
-          24333f8a63b6825ea9c5514f83c2829b004d1fee
-          EOF
-          cat > "$ANDROID_HOME/licenses/android-sdk-preview-license" << 'EOF'
-          84831b9409646161dcb09b76f32bff1f726404cc
-          EOF
-          cat > "$ANDROID_HOME/licenses/android-sdk-arm-dbt-license" << 'EOF'
-          d56f5187474654efc6090417231d4d5b11d0d6f0
-          EOF
-          cat > "$ANDROID_HOME/licenses/google-gdk-license" << 'EOF'
-          33b6a2b64607f11b759f320ef9dff4ae5c47d97a
-          EOF
-          cat > "$ANDROID_HOME/licenses/mips-android-sysimage-license" << 'EOF'
-          e9acab5b5fbb560a72cfaecce8946896db486400
-          EOF
-          cat > "$ANDROID_HOME/licenses/android-googletv-license" << 'EOF'
-          601085b94cd77f0b54ff86406957099ebe79c4d6
-          EOF
-          cat > "$ANDROID_HOME/licenses/android-googlexr-license" << 'EOF'
-          860e3f6c2d1e6c5f3e5c5f5e5c5f5e5c5f5e5c5f
-          EOF
-
-          # Locate sdkmanager from preinstalled cmdline-tools
-          SM=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f 2>/dev/null | head -n1 || true)
-          if [ -z "$SM" ]; then
-            SM=$(find /usr/local/lib/android -name sdkmanager -type f 2>/dev/null | head -n1 || true)
-          fi
-          echo "sdkmanager: $SM"
-
+          echo -e "24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$ANDROID_HOME/licenses/android-sdk-license"
+          echo -e "84831b9409646161dcb09b76f32bff1f726404cc" > "$ANDROID_HOME/licenses/android-sdk-preview-license"
+          SM=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f 2>/dev/null | head -n1)
           if [ -n "$SM" ]; then
-            # Install only what we need (never the removed 'tools' package)
-            yes | "$SM" --sdk_root="$ANDROID_HOME" \
-              "platforms;android-34" \
-              "build-tools;34.0.0" \
-              "platform-tools" || true
+            yes | "$SM" --sdk_root="$ANDROID_HOME" "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125" "platform-tools" || true
           fi
 
-          # Sanity
-          ls "$ANDROID_HOME/platforms" || true
-          ls "$ANDROID_HOME/build-tools" || true
+      - name: Install Rust + Android target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
 
-      - name: Copy sailfish profile into APK assets
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Build Rust cdylib for arm64-v8a
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.1.10909125
         run: |
-          mkdir -p android/app/src/main/assets
-          cp config/pixel1-sailfish.yaml android/app/src/main/assets/
+          # Find NDK if version path differs
+          if [ ! -d "$ANDROID_NDK_HOME" ]; then
+            ANDROID_NDK_HOME=$(find "$ANDROID_HOME/ndk" -maxdepth 1 -type d | tail -n1)
+            export ANDROID_NDK_HOME
+          fi
+          echo "NDK=$ANDROID_NDK_HOME"
+          cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs \
+            build --release --no-default-features --features loader
+          ls -la android/app/src/main/jniLibs/arm64-v8a/ || true
+          # cargo-ndk names it libpixel1_translator.so
 
-      - name: Setup Gradle 8.5
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.5'
 
-      - name: Build debug APK
+      - name: Assemble APK
         working-directory: android
         run: |
-          set -euo pipefail
           gradle wrapper --gradle-version 8.5
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Collect APK
         run: |
-          set -euo pipefail
           mkdir -p dist
           APK=$(find android/app/build/outputs/apk -name "*.apk" | head -n1)
-          if [ -z "$APK" ]; then
-            echo "ERROR: no APK produced"
-            find android -name "*.apk" || true
-            exit 1
-          fi
-          echo "Found APK: $APK"
           cp "$APK" dist/pixel1-hle.apk
           ls -lh dist/pixel1-hle.apk
 
@@ -168,42 +119,13 @@ jobs:
     if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
-          name: windows-x86_64
           path: artifacts
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: android-apk
-          path: artifacts
-
-      - name: Tag name
-        id: tag
-        run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            echo "name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-          elif [ -n "${{ github.event.inputs.tag }}" ]; then
-            echo "name=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "name=dev-$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
-          fi
-
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.name }}
-          name: Pixel1HLE ${{ steps.tag.outputs.name }}
+          tag_name: ${{ github.ref_name || 'dev' }}
           draft: true
-          generate_release_notes: true
           files: |
-            artifacts/pixel1-translator-windows-x86_64.zip
-            artifacts/pixel1-hle.apk
-          body: |
-            ## Pixel1HLE ${{ steps.tag.outputs.name }}
-
-            ### Windows
-            - `pixel1-translator-windows-x86_64.zip`
-
-            ### Android APK
-            - Install `pixel1-hle.apk` (`com.pixel.hle`)
+            artifacts/windows-x86_64/pixel1-translator-windows-x86_64.zip
+            artifacts/android-apk/pixel1-hle.apk

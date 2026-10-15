@@ -1,10 +1,11 @@
-//! pixel1-translator – Full HLE with UI state machine + terminal
+//! pixel1-translator – Full HLE with UI (desktop + Android NativeActivity)
 
 pub mod binder;
 pub mod cpu;
 pub mod error;
 pub mod hardware;
 pub mod logging;
+pub mod profile_embed;
 pub mod syscall;
 pub mod ui;
 
@@ -20,7 +21,6 @@ use serde::Deserialize;
 use std::path::Path;
 use std::sync::Arc;
 
-/// Top-level config file shape (device + hardware + …)
 #[derive(Debug, Deserialize)]
 struct RootConfig {
     hardware: hardware::HardwareProfile,
@@ -45,14 +45,21 @@ impl Pixel1Translator {
     pub fn new(profile_path: &str) -> Result<Self> {
         info!(target: "hle", "Pixel1Translator: booting sailfish HLE + UI");
 
-        let profile_str = std::fs::read_to_string(profile_path)
-            .map_err(|e| Pixel1Error::Config(e.to_string()))?;
-        let root: RootConfig = serde_yaml::from_str(&profile_str)
+        let profile_str = std::fs::read_to_string(profile_path).unwrap_or_else(|_| {
+            info!(target: "hle", "Profile file missing – using embedded sailfish defaults");
+            profile_embed::SAILFISH_YAML.to_string()
+        });
+
+        Self::from_yaml(&profile_str)
+    }
+
+    pub fn from_yaml(profile_str: &str) -> Result<Self> {
+        let root: RootConfig = serde_yaml::from_str(profile_str)
             .map_err(|e| Pixel1Error::Config(e.to_string()))?;
 
         let hw = HardwareStack::from_profile(root.hardware)?;
         hw.init_display()?;
-        hw.init_audio()?;
+        let _ = hw.init_audio();
 
         let cpu = Arc::new(CpuRuntime::new());
         let syscall = Arc::new(SyscallTranslator::new());
@@ -166,5 +173,47 @@ impl Pixel1Translator {
 
     pub fn example_cascade_get_window_service(&self) -> Result<Option<u32>> {
         self.binder.get_system_service("WINDOW_SERVICE")
+    }
+}
+
+/// Shared boot used by desktop main and Android NativeActivity
+pub fn boot_and_run() -> Result<()> {
+    let log_dir = {
+        #[cfg(target_os = "android")]
+        {
+            // App-private files dir is set by the activity; fall back to /data/local/tmp
+            std::path::PathBuf::from("/data/data/com.pixel.hle/files/logs")
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            std::path::PathBuf::from("logs")
+        }
+    };
+    let _ = std::fs::create_dir_all(&log_dir);
+    let _ = logging::init(&log_dir);
+
+    info!(target: "hle", "=== Pixel1HLE boot (shared Rust path) ===");
+
+    let rt = Pixel1Translator::from_yaml(profile_embed::SAILFISH_YAML)?;
+    rt.run_ui()
+}
+
+// ─── Android NativeActivity entry (same Rust UI stack as Windows) ───────────
+#[cfg(target_os = "android")]
+#[no_mangle]
+fn android_main(app: android_activity::AndroidApp) {
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Info)
+            .with_tag("Pixel1HLE"),
+    );
+
+    // Store the AndroidApp so winit can pick it up
+    winit::platform::android::activity::android_main(app);
+
+    // Note: winit 0.30 android uses EventLoop via android_main hook.
+    // Our ApplicationHandler runs through the same display module.
+    if let Err(e) = boot_and_run() {
+        log::error!(target: "hle", "Android boot failed: {e}");
     }
 }

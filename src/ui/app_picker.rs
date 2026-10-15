@@ -1,4 +1,4 @@
-//! Classic Android-style APK drawer + "Import ya!" button
+//! APK drawer + Import ya! (desktop rfd / Android scans sandbox)
 
 use crate::ui::{ApkEntry, EmulatorState, SharedUi};
 use egui::{self, Color32, RichText, Sense, Vec2};
@@ -22,7 +22,7 @@ impl AppPicker {
                             .strong(),
                     );
                     ui.label(
-                        RichText::new("sailfish  ·  Android 7.1")
+                        RichText::new("sailfish  ·  Android 7.1  ·  pure Rust")
                             .size(14.0)
                             .color(Color32::from_rgb(140, 140, 160)),
                     );
@@ -42,36 +42,22 @@ impl AppPicker {
 
                     if import_btn.clicked() {
                         drop(guard);
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Android Package", &["apk"])
-                            .set_title("Import ya! – choose an APK")
-                            .pick_file()
+                        #[cfg(not(target_os = "android"))]
                         {
-                            let path_str = path.to_string_lossy().to_string();
-                            let name = extract_display_name(&path).unwrap_or_else(|| {
-                                path.file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("imported.apk")
-                                    .to_string()
-                            });
-                            let size_mb = std::fs::metadata(&path)
-                                .map(|m| m.len() as f32 / 1_048_576.0)
-                                .unwrap_or(0.0);
-
-                            log::info!(target: "hle::display", "Import ya! selected: {} ({})", name, path_str);
-
-                            let mut g = shared.lock();
-                            if !g.available_apks.iter().any(|e| e.path == path_str) {
-                                g.available_apks.push(ApkEntry {
-                                    path: path_str.clone(),
-                                    name: name.clone(),
-                                    size_mb,
-                                });
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("Android Package", &["apk"])
+                                .set_title("Import ya! – choose an APK")
+                                .pick_file()
+                            {
+                                register_apk(shared, &path);
                             }
-                            g.selected_apk = Some(path_str);
-                            g.state = EmulatorState::BootAnimation { apk_name: name };
-                            g.loading_progress = 0.0;
-                            g.loading_status = "Preparing…".into();
+                        }
+                        #[cfg(target_os = "android")]
+                        {
+                            // On Android, scan common dirs and refresh list
+                            let mut g = shared.lock();
+                            g.available_apks = scan_android_apks();
+                            log::info!(target: "hle::display", "Android scan: {} APKs", g.available_apks.len());
                         }
                         return;
                     }
@@ -90,7 +76,7 @@ impl AppPicker {
                                 .color(Color32::from_rgb(180, 180, 200)),
                         );
                         ui.label(
-                            RichText::new("Use Import ya! or drop .apk files into ./apps/")
+                            RichText::new("Use Import ya! or place .apk in apps/")
                                 .size(14.0)
                                 .color(Color32::from_rgb(120, 120, 140)),
                         );
@@ -161,28 +147,65 @@ impl AppPicker {
     }
 }
 
-fn extract_display_name(apk_path: &Path) -> Option<String> {
-    let file = std::fs::File::open(apk_path).ok()?;
-    let mut archive = zip::ZipArchive::new(file).ok()?;
+#[cfg(not(target_os = "android"))]
+fn register_apk(shared: &SharedUi, path: &Path) {
+    let path_str = path.to_string_lossy().to_string();
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("imported.apk")
+        .to_string();
+    let size_mb = std::fs::metadata(path)
+        .map(|m| m.len() as f32 / 1_048_576.0)
+        .unwrap_or(0.0);
 
-    let mut manifest = archive.by_name("AndroidManifest.xml").ok()?;
-    let mut buf = Vec::new();
-    std::io::Read::read_to_end(&mut manifest, &mut buf).ok()?;
+    log::info!(target: "hle::display", "Import ya! selected: {} ({})", name, path_str);
 
-    let text = String::from_utf8_lossy(&buf);
-    for candidate in ["android:label=\"", "android:label=\"@string/"] {
-        if let Some(idx) = text.find(candidate) {
-            let rest = &text[idx + candidate.len()..];
-            let end = rest.find(['"', '<', '\0']).unwrap_or(rest.len().min(64));
-            let label = rest[..end].trim();
-            if !label.is_empty() && !label.starts_with('@') {
-                return Some(label.to_string());
+    let mut g = shared.lock();
+    if !g.available_apks.iter().any(|e| e.path == path_str) {
+        g.available_apks.push(ApkEntry {
+            path: path_str.clone(),
+            name: name.clone(),
+            size_mb,
+        });
+    }
+    g.selected_apk = Some(path_str);
+    g.state = EmulatorState::BootAnimation { apk_name: name };
+    g.loading_progress = 0.0;
+    g.loading_status = "Preparing…".into();
+}
+
+#[cfg(target_os = "android")]
+fn scan_android_apks() -> Vec<ApkEntry> {
+    let mut list = Vec::new();
+    let roots = [
+        "/sdcard/Download",
+        "/storage/emulated/0/Download",
+        "/data/data/com.pixel.hle/files/apps",
+        "/data/data/com.pixel.hle/files",
+    ];
+    for dir in roots {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let path = e.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("apk") {
+                    let size_mb = e
+                        .metadata()
+                        .map(|m| m.len() as f32 / 1_048_576.0)
+                        .unwrap_or(0.0);
+                    let name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    list.push(ApkEntry {
+                        path: path.to_string_lossy().into(),
+                        name,
+                        size_mb,
+                    });
+                }
             }
         }
     }
-
-    apk_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string())
+    list
 }
