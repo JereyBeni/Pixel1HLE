@@ -6,7 +6,7 @@
 use crate::error::{Pixel1Error, Result};
 use log::info;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::Path;
 use zip::ZipArchive;
 
