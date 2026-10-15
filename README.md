@@ -1,45 +1,59 @@
-# pixel1-translator
+# Pixel1HLE (`pixel1-translator`)
 
-**High-Level Emulation** for Android 7.1 (Pixel 1 / sailfish) with full **UI lifecycle**, dynamic linker and GLES bridge.
+Experimental **High-Level Emulation** research project targeting **Google Pixel 1 (sailfish)** / **Android 7.1**-era native packages.
 
-## UI State Machine
+This README reflects **verified source reality**, not aspirations.
 
-```
-AppPicker  →  BootAnimation  →  ApkLoading  →  GameRunning
-   │               │                 │               │
- egui drawer   spinning logo   progress bar    pure GLES
-```
+## What works today (verified in tree)
 
-- **AppPicker**: vintage Android drawer, scans `./` and `./apks/` for `.apk` files
-- **BootAnimation**: pure-egui pulsing/spinning Android-style logo (~2.2 s)
-- **ApkLoading**: live progress fed by the HLE linker (extract → map → relocate → JNI_OnLoad)
-- **GameRunning**: UI drops, `libunity.so` owns the 1920×1080 canvas
+| Area | Status | Notes |
+|------|--------|--------|
+| Desktop GUI shell (egui) | Partial | Window + AppPicker / boot / loading UI states exist |
+| APK ZIP inspection | **Implemented + unit tested** | `apk_inspect::inspect_apk` lists ABIs, `.so` names, manifest presence |
+| ELF parse / anonymous map | Partial | `object` + `memmap2` map section bytes; **not** full PT_LOAD program-header loader |
+| RELA application | **Not implemented** | `apply_relocations` only records undefined symbols / stubs; **does not patch GOT** |
+| Guest AArch64 execution on x86_64/Windows | **Unsupported** | `JNI_OnLoad` is **not** invoked on non-`aarch64` hosts (would be UB) |
+| JNI ABI / ART | Missing | No real `JavaVM` / `JNIEnv` |
+| Syscall translator | Stub table | Returns success / `-ENOSYS`; not wired to a CPU frontend |
+| GLES bridge | Host stubs | Some `gl*` calls forward to `glow` when a context exists; EGL is largely fake |
+| Android APK product | CI packaging | NativeActivity shell; not a working emulator of arbitrary APKs |
 
-## Quick start
+## What does **not** work
+
+- Running arbitrary Android games or Unity/AIR titles to completion on Windows/Linux x86_64.
+- Transparent execution of ARM64 machine code on x86 hosts without a CPU emulator / DBT backend.
+- Full Bionic, Binder, or framework compatibility.
+
+## Build
 
 ```bash
-cargo run --release
+# Library + desktop binary
+cargo check --features desktop,loader
+cargo test --features desktop,loader
+cargo build --release --features desktop,loader
 ```
 
-Drop any `.apk` that contains `lib/arm64-v8a/*.so` next to the binary (or inside `apks/`) and click it in the picker.
+Android NDK / APK packaging is handled by `.github/workflows` and the `android/` Gradle tree. Treat those as packaging experiments until the core loader/execution path is real.
 
-## Architecture
+## Architecture (current)
 
 ```
-APK
- → ApkElfExecutor (progress → UI)
- → PT_LOAD + RELA + JNI_OnLoad
- → GLES Bridge (egl*/gl* → glow)
- → 1920×1080 sailfish surface
+APK file
+  → apk_inspect (ZIP metadata)          [works, tested]
+  → ApkElfExecutor extract .so          [works]
+  → map bytes + symbol inventory        [partial]
+  → apply_relocations                   [NO GOT writes yet]
+  → call JNI_OnLoad                     [blocked on non-aarch64]
+  → CPU / syscall frontend              [missing]
 ```
 
-## Status
+## Honest next milestones
 
-| Component              | Status |
-|------------------------|--------|
-| egui state machine     | ✅     |
-| Boot animation         | ✅     |
-| Live loading progress  | ✅     |
-| APK picker             | ✅     |
-| Dynamic linker         | ✅     |
-| GLES HLE bridge        | ✅     |
+1. **PT_LOAD + real RELA** application with bounds checks and unit tests.
+2. **Guest execution model**: integrate an AArch64 interpreter/DBT **or** restrict runtime to aarch64 hosts.
+3. Minimal **JNIEnv** surface after execution exists.
+4. Graphics only after guest code can call into the GLES bridge safely.
+
+## License
+
+MIT
