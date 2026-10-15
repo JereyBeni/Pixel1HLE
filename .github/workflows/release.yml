@@ -1,9 +1,14 @@
-name: Release
+name: Build & Release
 
 on:
   push:
+    branches:
+      - '**'          # every commit on every branch
     tags:
       - 'v*'
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       tag:
@@ -20,7 +25,7 @@ env:
 
 jobs:
   # ─────────────────────────────────────────────────────────────
-  # Windows executable package
+  # Windows executable package – runs on EVERY commit
   # ─────────────────────────────────────────────────────────────
   windows:
     name: Windows (x86_64)
@@ -59,7 +64,7 @@ jobs:
           Set-Content -Path "$Out/fonts/README.txt" -Value "Optional custom fonts for the egui UI."
           Set-Content -Path "$Out/assets/README.txt" -Value "Optional UI graphics / icons."
 
-          $Version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "dev-$(Get-Date -Format yyyyMMdd)" }
+          $Version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "dev-$(Get-Date -Format yyyyMMdd-HHmm)" }
           Set-Content -Path "$Out/VERSION.txt" -Value $Version
 
       - name: Zip Windows package
@@ -74,10 +79,10 @@ jobs:
         with:
           name: windows-x86_64
           path: dist/pixel1-translator-windows-x86_64.zip
-          retention-days: 14
+          retention-days: 7
 
   # ─────────────────────────────────────────────────────────────
-  # Android / Linux runtime package
+  # Android / Linux runtime package – runs on EVERY commit
   # ─────────────────────────────────────────────────────────────
   android:
     name: Android runtime package
@@ -159,7 +164,7 @@ jobs:
           if [ "${{ github.ref_type }}" = "tag" ]; then
             echo "${{ github.ref_name }}" > "$OUT/VERSION.txt"
           else
-            echo "dev-$(date +%Y%m%d)" > "$OUT/VERSION.txt"
+            echo "dev-$(date +%Y%m%d-%H%M)" > "$OUT/VERSION.txt"
           fi
 
           mkdir -p "$OUT/bin"
@@ -175,10 +180,10 @@ jobs:
         with:
           name: android-runtime
           path: dist/pixel1-hle-android.zip
-          retention-days: 14
+          retention-days: 7
 
   # ─────────────────────────────────────────────────────────────
-  # Publish GitHub Release (draft)
+  # Publish GitHub Release (draft) – ONLY on tags / manual dispatch
   # ─────────────────────────────────────────────────────────────
   release:
     name: Publish Release
@@ -228,14 +233,7 @@ jobs:
             ### Windows package
             - Extract `pixel1-translator-windows-x86_64.zip`
             - Run `pixel1-translator.exe`
-            - Drop guest APKs into the `apps/` folder **or** use the **Import ya!** button inside the AppPicker
+            - Drop guest APKs into the `apps/` folder **or** use the **Import ya!** button
 
             ### Android runtime package
-            - Extract under the app sandbox so the layout becomes:
-              `Android/data/com.pixel.hle/{config,apps,fonts,assets,cache,logs}`
-            - All HLE reads/writes stay inside that sandbox
-            - `AndroidManifest.xml` is included for packaging / future wrapper APKs
-
-            ### Notes
-            - First launch opens the AppPicker (1920×1080 sailfish canvas)
-            - Select an APK → BootAnimation → ApkLoading (live linker progress) → GameRunning
+            - Layout: `Android/data/com.pixel.hle/{config,apps,fonts,assets,cache,logs}`
