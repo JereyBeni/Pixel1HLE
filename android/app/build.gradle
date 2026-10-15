@@ -40,12 +40,8 @@ android {
         }
     }
 
-    // Ship sailfish profile + assets inside the APK
-    sourceSets {
-        main {
-            assets.srcDirs = ['src/main/assets', '../../config']
-        }
-    }
+    // Assets live only in src/main/assets
+    // CI copies config/pixel1-sailfish.yaml there before the build
 }
 
 dependencies {
