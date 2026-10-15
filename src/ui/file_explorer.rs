@@ -1,6 +1,6 @@
 //! Host file explorer – browse drives / folders and pick .apk files
 
-use egui::{self, Color32, RichText, Sense, Vec2};
+use egui::{self, Color32, RichText, Vec2};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
