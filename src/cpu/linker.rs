@@ -15,16 +15,23 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use zip::ZipArchive;
 
-/// Safe-ish function-pointer → usize for the GOT/PLT hook table
-fn fn_addr(f: *const ()) -> usize {
-    f as usize
-}
-
-macro_rules! addr_of_fn {
-    ($f:expr) => {{
-        let p: *const () = $f as *const ();
-        fn_addr(p)
-    }};
+/// Convert any function item / pointer into a raw address for the GOT table.
+#[inline]
+fn addr_of_fn<T>(f: T) -> usize {
+    // Function items are zero-sized; we transmute the *value* of the fn pointer
+    // after coercing through a thin pointer. This is the standard pattern for
+    // building PLT/GOT hook tables in HLE loaders.
+    assert_eq!(std::mem::size_of::<T>(), std::mem::size_of::<usize>());
+    let mut buf = 0usize;
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            &f as *const T as *const u8,
+            &mut buf as *mut usize as *mut u8,
+            std::mem::size_of::<usize>(),
+        );
+    }
+    std::mem::forget(f);
+    buf
 }
 
 #[derive(Debug)]
@@ -50,50 +57,47 @@ impl SymbolResolver {
         let mut table = HashMap::new();
 
         let mut egl = HashMap::new();
-        egl.insert("eglGetDisplay".into(), addr_of_fn!(gles_bridge::eglGetDisplay));
-        egl.insert("eglInitialize".into(), addr_of_fn!(gles_bridge::eglInitialize));
-        egl.insert("eglChooseConfig".into(), addr_of_fn!(gles_bridge::eglChooseConfig));
-        egl.insert(
-            "eglCreateWindowSurface".into(),
-            addr_of_fn!(gles_bridge::eglCreateWindowSurface),
-        );
-        egl.insert("eglCreateContext".into(), addr_of_fn!(gles_bridge::eglCreateContext));
-        egl.insert("eglMakeCurrent".into(), addr_of_fn!(gles_bridge::eglMakeCurrent));
-        egl.insert("eglSwapBuffers".into(), addr_of_fn!(gles_bridge::eglSwapBuffers));
-        egl.insert("eglGetError".into(), addr_of_fn!(gles_bridge::eglGetError));
-        egl.insert("eglTerminate".into(), addr_of_fn!(gles_bridge::eglTerminate));
-        egl.insert("eglQueryString".into(), addr_of_fn!(gles_bridge::eglQueryString));
+        egl.insert("eglGetDisplay".into(), addr_of_fn(gles_bridge::eglGetDisplay as unsafe extern "C" fn(*mut _) -> _));
+        egl.insert("eglInitialize".into(), addr_of_fn(gles_bridge::eglInitialize as unsafe extern "C" fn(_, *mut _, *mut _) -> _));
+        egl.insert("eglChooseConfig".into(), addr_of_fn(gles_bridge::eglChooseConfig as unsafe extern "C" fn(_, *const _, *mut _, _, *mut _) -> _));
+        egl.insert("eglCreateWindowSurface".into(), addr_of_fn(gles_bridge::eglCreateWindowSurface as unsafe extern "C" fn(_, _, _, *const _) -> _));
+        egl.insert("eglCreateContext".into(), addr_of_fn(gles_bridge::eglCreateContext as unsafe extern "C" fn(_, _, _, *const _) -> _));
+        egl.insert("eglMakeCurrent".into(), addr_of_fn(gles_bridge::eglMakeCurrent as unsafe extern "C" fn(_, _, _, _) -> _));
+        egl.insert("eglSwapBuffers".into(), addr_of_fn(gles_bridge::eglSwapBuffers as unsafe extern "C" fn(_, _) -> _));
+        egl.insert("eglGetError".into(), addr_of_fn(gles_bridge::eglGetError as unsafe extern "C" fn() -> _));
+        egl.insert("eglTerminate".into(), addr_of_fn(gles_bridge::eglTerminate as unsafe extern "C" fn(_) -> _));
+        egl.insert("eglQueryString".into(), addr_of_fn(gles_bridge::eglQueryString as unsafe extern "C" fn(_, _) -> _));
         table.insert("libEGL.so".into(), egl);
 
         let mut gles = HashMap::new();
-        gles.insert("glViewport".into(), addr_of_fn!(gles_bridge::glViewport));
-        gles.insert("glClear".into(), addr_of_fn!(gles_bridge::glClear));
-        gles.insert("glClearColor".into(), addr_of_fn!(gles_bridge::glClearColor));
-        gles.insert("glGenBuffers".into(), addr_of_fn!(gles_bridge::glGenBuffers));
-        gles.insert("glBindBuffer".into(), addr_of_fn!(gles_bridge::glBindBuffer));
-        gles.insert("glBufferData".into(), addr_of_fn!(gles_bridge::glBufferData));
-        gles.insert("glDrawElements".into(), addr_of_fn!(gles_bridge::glDrawElements));
-        gles.insert("glEnable".into(), addr_of_fn!(gles_bridge::glEnable));
-        gles.insert("glDisable".into(), addr_of_fn!(gles_bridge::glDisable));
-        gles.insert("glGetError".into(), addr_of_fn!(gles_bridge::glGetError));
-        gles.insert("glGetString".into(), addr_of_fn!(gles_bridge::glGetString));
-        gles.insert("glPixelStorei".into(), addr_of_fn!(gles_bridge::glPixelStorei));
-        gles.insert("glHint".into(), addr_of_fn!(gles_bridge::glHint));
-        gles.insert("glDepthMask".into(), addr_of_fn!(gles_bridge::glDepthMask));
-        gles.insert("glColorMask".into(), addr_of_fn!(gles_bridge::glColorMask));
-        gles.insert("glBlendFunc".into(), addr_of_fn!(gles_bridge::glBlendFunc));
-        gles.insert("glCullFace".into(), addr_of_fn!(gles_bridge::glCullFace));
-        gles.insert("glFrontFace".into(), addr_of_fn!(gles_bridge::glFrontFace));
+        gles.insert("glViewport".into(), addr_of_fn(gles_bridge::glViewport as unsafe extern "C" fn(_, _, _, _)));
+        gles.insert("glClear".into(), addr_of_fn(gles_bridge::glClear as unsafe extern "C" fn(_)));
+        gles.insert("glClearColor".into(), addr_of_fn(gles_bridge::glClearColor as unsafe extern "C" fn(_, _, _, _)));
+        gles.insert("glGenBuffers".into(), addr_of_fn(gles_bridge::glGenBuffers as unsafe extern "C" fn(_, *mut _)));
+        gles.insert("glBindBuffer".into(), addr_of_fn(gles_bridge::glBindBuffer as unsafe extern "C" fn(_, _)));
+        gles.insert("glBufferData".into(), addr_of_fn(gles_bridge::glBufferData as unsafe extern "C" fn(_, _, *const _, _)));
+        gles.insert("glDrawElements".into(), addr_of_fn(gles_bridge::glDrawElements as unsafe extern "C" fn(_, _, _, *const _)));
+        gles.insert("glEnable".into(), addr_of_fn(gles_bridge::glEnable as unsafe extern "C" fn(_)));
+        gles.insert("glDisable".into(), addr_of_fn(gles_bridge::glDisable as unsafe extern "C" fn(_)));
+        gles.insert("glGetError".into(), addr_of_fn(gles_bridge::glGetError as unsafe extern "C" fn() -> _));
+        gles.insert("glGetString".into(), addr_of_fn(gles_bridge::glGetString as unsafe extern "C" fn(_) -> _));
+        gles.insert("glPixelStorei".into(), addr_of_fn(gles_bridge::glPixelStorei as unsafe extern "C" fn(_, _)));
+        gles.insert("glHint".into(), addr_of_fn(gles_bridge::glHint as unsafe extern "C" fn(_, _)));
+        gles.insert("glDepthMask".into(), addr_of_fn(gles_bridge::glDepthMask as unsafe extern "C" fn(_)));
+        gles.insert("glColorMask".into(), addr_of_fn(gles_bridge::glColorMask as unsafe extern "C" fn(_, _, _, _)));
+        gles.insert("glBlendFunc".into(), addr_of_fn(gles_bridge::glBlendFunc as unsafe extern "C" fn(_, _)));
+        gles.insert("glCullFace".into(), addr_of_fn(gles_bridge::glCullFace as unsafe extern "C" fn(_)));
+        gles.insert("glFrontFace".into(), addr_of_fn(gles_bridge::glFrontFace as unsafe extern "C" fn(_)));
         table.insert("libGLESv2.so".into(), gles.clone());
         table.insert("libGLESv3.so".into(), gles);
 
         let mut bionic = HashMap::new();
-        bionic.insert("__errno".into(), addr_of_fn!(stub_errno));
-        bionic.insert("malloc".into(), addr_of_fn!(stub_malloc));
-        bionic.insert("free".into(), addr_of_fn!(stub_free));
-        bionic.insert("memcpy".into(), addr_of_fn!(stub_memcpy));
-        bionic.insert("memset".into(), addr_of_fn!(stub_memset));
-        bionic.insert("strlen".into(), addr_of_fn!(stub_strlen));
+        bionic.insert("__errno".into(), addr_of_fn(stub_errno as unsafe extern "C" fn() -> _));
+        bionic.insert("malloc".into(), addr_of_fn(stub_malloc as unsafe extern "C" fn(_) -> _));
+        bionic.insert("free".into(), addr_of_fn(stub_free as unsafe extern "C" fn(_)));
+        bionic.insert("memcpy".into(), addr_of_fn(stub_memcpy as unsafe extern "C" fn(_, _, _) -> _));
+        bionic.insert("memset".into(), addr_of_fn(stub_memset as unsafe extern "C" fn(_, _, _) -> _));
+        bionic.insert("strlen".into(), addr_of_fn(stub_strlen as unsafe extern "C" fn(_) -> _));
         table.insert("libc.so".into(), bionic);
 
         Self { table }
@@ -393,6 +397,6 @@ impl ApkElfExecutor {
             }
         }
         error!(target: "hle::linker", "Symbol missing: {} (requested by {}) – safe stub", sym, from_soname);
-        addr_of_fn!(unresolved_stub)
+        addr_of_fn(unresolved_stub as unsafe extern "C" fn() -> i64)
     }
 }
