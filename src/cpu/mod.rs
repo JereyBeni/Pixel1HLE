@@ -5,16 +5,14 @@ mod linker;
 pub use linker::{ApkElfExecutor, LoadedLibrary, SymbolResolver};
 
 use crate::error::{Pixel1Error, Result};
-use log::{debug, info, warn};
+use log::{debug, info};
 use memmap2::MmapOptions;
 use object::{Object, ObjectSection};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
-use std::sync::Arc;
 
-/// Guest virtual address space region
 #[derive(Debug)]
 pub struct GuestMapping {
     pub guest_base: u64,
@@ -26,7 +24,6 @@ pub struct GuestMapping {
 unsafe impl Send for GuestMapping {}
 unsafe impl Sync for GuestMapping {}
 
-/// JNI native method hook table entry
 #[derive(Debug, Clone)]
 pub struct JniHook {
     pub class: String,
@@ -35,13 +32,11 @@ pub struct JniHook {
     pub host_fn: usize,
 }
 
-/// Core CPU / loader state
 pub struct CpuRuntime {
     mappings: RwLock<Vec<GuestMapping>>,
     jni_hooks: RwLock<HashMap<u64, JniHook>>,
     loaded_libs: RwLock<HashMap<String, u64>>,
     next_guest_base: RwLock<u64>,
-    /// The HLE dynamic linker instance
     pub linker: RwLock<Option<ApkElfExecutor>>,
 }
 
@@ -56,7 +51,6 @@ impl CpuRuntime {
         }
     }
 
-    /// Legacy simple ELF loader (kept for non-APK paths)
     pub fn load_elf(&self, path: &Path, soname: &str) -> Result<u64> {
         info!("CPU: loading ELF {} as {}", path.display(), soname);
 
@@ -145,12 +139,10 @@ impl CpuRuntime {
         self.loaded_libs.read().get(soname).copied()
     }
 
-    /// Attach a fully constructed ApkElfExecutor (called from Pixel1Translator)
     pub fn attach_linker(&self, executor: ApkElfExecutor) {
         *self.linker.write() = Some(executor);
     }
 
-    /// Demo: simulate the exact early graphics calls that libunity.so issues
     pub fn demo_unity_graphics_bootstrap(&self) {
         info!(target: "hle::gles", "CPU: simulating Unity graphics bootstrap cascade");
 

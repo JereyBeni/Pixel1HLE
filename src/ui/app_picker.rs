@@ -8,10 +8,10 @@ pub struct AppPicker;
 
 impl AppPicker {
     pub fn ui(ctx: &egui::Context, shared: &SharedUi) {
-        let mut guard = shared.lock();
+        let guard = shared.lock();
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(Color32::from_rgb(18, 18, 24)))
+            .frame(egui::Frame::NONE.fill(Color32::from_rgb(18, 18, 24)))
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(28.0);
@@ -28,7 +28,6 @@ impl AppPicker {
                     );
                     ui.add_space(16.0);
 
-                    // ── Import ya! button ───────────────────────────────────
                     let import_btn = ui.add_sized(
                         Vec2::new(220.0, 40.0),
                         egui::Button::new(
@@ -42,20 +41,19 @@ impl AppPicker {
                     );
 
                     if import_btn.clicked() {
-                        drop(guard); // release lock before blocking dialog
+                        drop(guard);
                         if let Some(path) = rfd::FileDialog::new()
                             .add_filter("Android Package", &["apk"])
                             .set_title("Import ya! – choose an APK")
                             .pick_file()
                         {
                             let path_str = path.to_string_lossy().to_string();
-                            let name = extract_display_name(&path)
-                                .unwrap_or_else(|| {
-                                    path.file_name()
-                                        .and_then(|n| n.to_str())
-                                        .unwrap_or("imported.apk")
-                                        .to_string()
-                                });
+                            let name = extract_display_name(&path).unwrap_or_else(|| {
+                                path.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("imported.apk")
+                                    .to_string()
+                            });
                             let size_mb = std::fs::metadata(&path)
                                 .map(|m| m.len() as f32 / 1_048_576.0)
                                 .unwrap_or(0.0);
@@ -63,7 +61,6 @@ impl AppPicker {
                             log::info!(target: "hle::display", "Import ya! selected: {} ({})", name, path_str);
 
                             let mut g = shared.lock();
-                            // Avoid duplicates
                             if !g.available_apks.iter().any(|e| e.path == path_str) {
                                 g.available_apks.push(ApkEntry {
                                     path: path_str.clone(),
@@ -76,13 +73,12 @@ impl AppPicker {
                             g.loading_progress = 0.0;
                             g.loading_status = "Preparing…".into();
                         }
-                        return; // early exit after dialog
+                        return;
                     }
 
                     ui.add_space(20.0);
                 });
 
-                // Re-acquire after possible early return
                 let mut guard = shared.lock();
 
                 if guard.available_apks.is_empty() {
@@ -102,7 +98,6 @@ impl AppPicker {
                     return;
                 }
 
-                // Grid of APK cards
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.add_space(10.0);
                     let available = guard.available_apks.clone();
@@ -120,11 +115,12 @@ impl AppPicker {
                         ui.painter().rect_stroke(
                             rect,
                             10.0,
-                            egui::Stroke::new(1.0, Color32::from_rgb(60, 70, 90)),
+                            egui::Stroke::new(1.0_f32, Color32::from_rgb(60, 70, 90)),
                         );
 
                         let icon_center = egui::pos2(rect.left() + 36.0, rect.center().y);
-                        ui.painter().circle_filled(icon_center, 22.0, Color32::from_rgb(60, 180, 90));
+                        ui.painter()
+                            .circle_filled(icon_center, 22.0, Color32::from_rgb(60, 180, 90));
                         ui.painter().text(
                             icon_center,
                             egui::Align2::CENTER_CENTER,
@@ -165,21 +161,14 @@ impl AppPicker {
     }
 }
 
-/// Try to read a friendly label from AndroidManifest.xml inside the APK.
-/// Falls back to the filename if anything fails.
 fn extract_display_name(apk_path: &Path) -> Option<String> {
     let file = std::fs::File::open(apk_path).ok()?;
     let mut archive = zip::ZipArchive::new(file).ok()?;
 
-    // Prefer the binary AndroidManifest.xml (AXML). We do a very light
-    // string scan for the most common label patterns; a full AXML parser
-    // is overkill for the picker.
     let mut manifest = archive.by_name("AndroidManifest.xml").ok()?;
     let mut buf = Vec::new();
     std::io::Read::read_to_end(&mut manifest, &mut buf).ok()?;
 
-    // Look for readable UTF-8 / UTF-16 fragments that look like an app label.
-    // Many games embed the label as plain strings even inside binary AXML.
     let text = String::from_utf8_lossy(&buf);
     for candidate in ["android:label=\"", "android:label=\"@string/"] {
         if let Some(idx) = text.find(candidate) {
@@ -192,7 +181,6 @@ fn extract_display_name(apk_path: &Path) -> Option<String> {
         }
     }
 
-    // Fallback: filename without extension
     apk_path
         .file_stem()
         .and_then(|s| s.to_str())

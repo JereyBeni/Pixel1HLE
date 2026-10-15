@@ -1,20 +1,23 @@
 //! HLE Dynamic Linker & APK ELF Executor
-//! Now reports live progress to the UI loading screen.
 
 use crate::error::{Pixel1Error, Result};
 use crate::hardware::display::DisplaySurface;
 use crate::hardware::gles_bridge;
 use crate::ui::SharedUi;
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use memmap2::{MmapMut, MmapOptions};
 use object::{Object, ObjectSection, ObjectSymbol};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use zip::ZipArchive;
+
+fn fn_addr<F>(f: F) -> usize {
+    f as *const () as usize
+}
 
 #[derive(Debug)]
 pub struct LoadedLibrary {
@@ -39,68 +42,76 @@ impl SymbolResolver {
         let mut table = HashMap::new();
 
         let mut egl = HashMap::new();
-        egl.insert("eglGetDisplay".into(), gles_bridge::eglGetDisplay as usize);
-        egl.insert("eglInitialize".into(), gles_bridge::eglInitialize as usize);
-        egl.insert("eglChooseConfig".into(), gles_bridge::eglChooseConfig as usize);
-        egl.insert("eglCreateWindowSurface".into(), gles_bridge::eglCreateWindowSurface as usize);
-        egl.insert("eglCreateContext".into(), gles_bridge::eglCreateContext as usize);
-        egl.insert("eglMakeCurrent".into(), gles_bridge::eglMakeCurrent as usize);
-        egl.insert("eglSwapBuffers".into(), gles_bridge::eglSwapBuffers as usize);
-        egl.insert("eglGetError".into(), gles_bridge::eglGetError as usize);
-        egl.insert("eglTerminate".into(), gles_bridge::eglTerminate as usize);
-        egl.insert("eglQueryString".into(), gles_bridge::eglQueryString as usize);
+        egl.insert("eglGetDisplay".into(), fn_addr(gles_bridge::eglGetDisplay));
+        egl.insert("eglInitialize".into(), fn_addr(gles_bridge::eglInitialize));
+        egl.insert("eglChooseConfig".into(), fn_addr(gles_bridge::eglChooseConfig));
+        egl.insert(
+            "eglCreateWindowSurface".into(),
+            fn_addr(gles_bridge::eglCreateWindowSurface),
+        );
+        egl.insert("eglCreateContext".into(), fn_addr(gles_bridge::eglCreateContext));
+        egl.insert("eglMakeCurrent".into(), fn_addr(gles_bridge::eglMakeCurrent));
+        egl.insert("eglSwapBuffers".into(), fn_addr(gles_bridge::eglSwapBuffers));
+        egl.insert("eglGetError".into(), fn_addr(gles_bridge::eglGetError));
+        egl.insert("eglTerminate".into(), fn_addr(gles_bridge::eglTerminate));
+        egl.insert("eglQueryString".into(), fn_addr(gles_bridge::eglQueryString));
         table.insert("libEGL.so".into(), egl);
 
         let mut gles = HashMap::new();
-        gles.insert("glViewport".into(), gles_bridge::glViewport as usize);
-        gles.insert("glClear".into(), gles_bridge::glClear as usize);
-        gles.insert("glClearColor".into(), gles_bridge::glClearColor as usize);
-        gles.insert("glGenBuffers".into(), gles_bridge::glGenBuffers as usize);
-        gles.insert("glBindBuffer".into(), gles_bridge::glBindBuffer as usize);
-        gles.insert("glBufferData".into(), gles_bridge::glBufferData as usize);
-        gles.insert("glDrawElements".into(), gles_bridge::glDrawElements as usize);
-        gles.insert("glEnable".into(), gles_bridge::glEnable as usize);
-        gles.insert("glDisable".into(), gles_bridge::glDisable as usize);
-        gles.insert("glGetError".into(), gles_bridge::glGetError as usize);
-        gles.insert("glGetString".into(), gles_bridge::glGetString as usize);
-        gles.insert("glPixelStorei".into(), gles_bridge::glPixelStorei as usize);
-        gles.insert("glHint".into(), gles_bridge::glHint as usize);
-        gles.insert("glDepthMask".into(), gles_bridge::glDepthMask as usize);
-        gles.insert("glColorMask".into(), gles_bridge::glColorMask as usize);
-        gles.insert("glBlendFunc".into(), gles_bridge::glBlendFunc as usize);
-        gles.insert("glCullFace".into(), gles_bridge::glCullFace as usize);
-        gles.insert("glFrontFace".into(), gles_bridge::glFrontFace as usize);
+        gles.insert("glViewport".into(), fn_addr(gles_bridge::glViewport));
+        gles.insert("glClear".into(), fn_addr(gles_bridge::glClear));
+        gles.insert("glClearColor".into(), fn_addr(gles_bridge::glClearColor));
+        gles.insert("glGenBuffers".into(), fn_addr(gles_bridge::glGenBuffers));
+        gles.insert("glBindBuffer".into(), fn_addr(gles_bridge::glBindBuffer));
+        gles.insert("glBufferData".into(), fn_addr(gles_bridge::glBufferData));
+        gles.insert("glDrawElements".into(), fn_addr(gles_bridge::glDrawElements));
+        gles.insert("glEnable".into(), fn_addr(gles_bridge::glEnable));
+        gles.insert("glDisable".into(), fn_addr(gles_bridge::glDisable));
+        gles.insert("glGetError".into(), fn_addr(gles_bridge::glGetError));
+        gles.insert("glGetString".into(), fn_addr(gles_bridge::glGetString));
+        gles.insert("glPixelStorei".into(), fn_addr(gles_bridge::glPixelStorei));
+        gles.insert("glHint".into(), fn_addr(gles_bridge::glHint));
+        gles.insert("glDepthMask".into(), fn_addr(gles_bridge::glDepthMask));
+        gles.insert("glColorMask".into(), fn_addr(gles_bridge::glColorMask));
+        gles.insert("glBlendFunc".into(), fn_addr(gles_bridge::glBlendFunc));
+        gles.insert("glCullFace".into(), fn_addr(gles_bridge::glCullFace));
+        gles.insert("glFrontFace".into(), fn_addr(gles_bridge::glFrontFace));
         table.insert("libGLESv2.so".into(), gles.clone());
         table.insert("libGLESv3.so".into(), gles);
 
         let mut bionic = HashMap::new();
-        bionic.insert("__errno".into(), stub_errno as usize);
-        bionic.insert("malloc".into(), stub_malloc as usize);
-        bionic.insert("free".into(), stub_free as usize);
-        bionic.insert("memcpy".into(), stub_memcpy as usize);
-        bionic.insert("memset".into(), stub_memset as usize);
-        bionic.insert("strlen".into(), stub_strlen as usize);
+        bionic.insert("__errno".into(), fn_addr(stub_errno));
+        bionic.insert("malloc".into(), fn_addr(stub_malloc));
+        bionic.insert("free".into(), fn_addr(stub_free));
+        bionic.insert("memcpy".into(), fn_addr(stub_memcpy));
+        bionic.insert("memset".into(), fn_addr(stub_memset));
+        bionic.insert("strlen".into(), fn_addr(stub_strlen));
         table.insert("libc.so".into(), bionic);
 
         Self { table }
     }
 
     pub fn resolve(&self, soname: &str, sym: &str) -> Option<usize> {
-        self.table.get(soname).and_then(|m| m.get(sym).copied()).or_else(|| {
-            for (k, m) in &self.table {
-                if k.contains(soname.trim_start_matches("lib").trim_end_matches(".so")) {
-                    if let Some(p) = m.get(sym) {
-                        return Some(*p);
+        self.table
+            .get(soname)
+            .and_then(|m| m.get(sym).copied())
+            .or_else(|| {
+                for (k, m) in &self.table {
+                    if k.contains(soname.trim_start_matches("lib").trim_end_matches(".so")) {
+                        if let Some(p) = m.get(sym) {
+                            return Some(*p);
+                        }
                     }
                 }
-            }
-            None
-        })
+                None
+            })
     }
 }
 
 impl Default for SymbolResolver {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 unsafe extern "C" fn stub_errno() -> *mut i32 {
@@ -124,17 +135,20 @@ unsafe extern "C" fn stub_memset(dest: *mut u8, c: i32, n: usize) -> *mut u8 {
 }
 unsafe extern "C" fn stub_strlen(s: *const u8) -> usize {
     let mut len = 0;
-    while *s.add(len) != 0 { len += 1; }
+    while *s.add(len) != 0 {
+        len += 1;
+    }
     len
 }
-unsafe extern "C" fn unresolved_stub() -> i64 { 0 }
+unsafe extern "C" fn unresolved_stub() -> i64 {
+    0
+}
 
 pub struct ApkElfExecutor {
     apk_path: PathBuf,
     resolver: SymbolResolver,
     loaded: RwLock<HashMap<String, Arc<LoadedLibrary>>>,
     next_guest_base: RwLock<u64>,
-    /// Optional UI bridge for live progress
     ui_shared: Option<SharedUi>,
 }
 
@@ -161,11 +175,15 @@ impl ApkElfExecutor {
     }
 
     pub fn list_native_libs(&self) -> Result<Vec<String>> {
-        let file = File::open(&self.apk_path).map_err(|e| Pixel1Error::ElfLoad(format!("open apk: {e}")))?;
-        let mut archive = ZipArchive::new(file).map_err(|e| Pixel1Error::ElfLoad(format!("zip: {e}")))?;
+        let file =
+            File::open(&self.apk_path).map_err(|e| Pixel1Error::ElfLoad(format!("open apk: {e}")))?;
+        let mut archive =
+            ZipArchive::new(file).map_err(|e| Pixel1Error::ElfLoad(format!("zip: {e}")))?;
         let mut libs = Vec::new();
         for i in 0..archive.len() {
-            let entry = archive.by_index(i).map_err(|e| Pixel1Error::ElfLoad(format!("zip entry: {e}")))?;
+            let entry = archive
+                .by_index(i)
+                .map_err(|e| Pixel1Error::ElfLoad(format!("zip entry: {e}")))?;
             let name = entry.name().to_string();
             if name.starts_with("lib/arm64-v8a/") && name.ends_with(".so") {
                 libs.push(name.rsplit('/').next().unwrap_or(&name).to_string());
@@ -194,17 +212,24 @@ impl ApkElfExecutor {
     }
 
     fn extract_so(&self, soname: &str) -> Result<Vec<u8>> {
-        let file = File::open(&self.apk_path).map_err(|e| Pixel1Error::ElfLoad(format!("open apk: {e}")))?;
-        let mut archive = ZipArchive::new(file).map_err(|e| Pixel1Error::ElfLoad(format!("zip: {e}")))?;
+        let file =
+            File::open(&self.apk_path).map_err(|e| Pixel1Error::ElfLoad(format!("open apk: {e}")))?;
+        let mut archive =
+            ZipArchive::new(file).map_err(|e| Pixel1Error::ElfLoad(format!("zip: {e}")))?;
         let path_in_apk = format!("lib/arm64-v8a/{soname}");
-        let mut entry = archive.by_name(&path_in_apk).map_err(|e| Pixel1Error::ElfLoad(format!("{path_in_apk}: {e}")))?;
+        let mut entry = archive
+            .by_name(&path_in_apk)
+            .map_err(|e| Pixel1Error::ElfLoad(format!("{path_in_apk}: {e}")))?;
         let mut buf = Vec::with_capacity(entry.size() as usize);
-        entry.read_to_end(&mut buf).map_err(|e| Pixel1Error::ElfLoad(format!("read so: {e}")))?;
+        entry
+            .read_to_end(&mut buf)
+            .map_err(|e| Pixel1Error::ElfLoad(format!("read so: {e}")))?;
         Ok(buf)
     }
 
     fn map_and_relocate(&self, soname: &str, data: &[u8]) -> Result<LoadedLibrary> {
-        let obj = object::File::parse(data).map_err(|e| Pixel1Error::ElfLoad(format!("ELF parse {soname}: {e}")))?;
+        let obj = object::File::parse(data)
+            .map_err(|e| Pixel1Error::ElfLoad(format!("ELF parse {soname}: {e}")))?;
         if obj.architecture() != object::Architecture::Aarch64 {
             return Err(Pixel1Error::ElfLoad(format!("{soname} is not ARM64")));
         }
@@ -221,12 +246,18 @@ impl ApkElfExecutor {
                 max_vaddr = max_vaddr.max(end);
             }
         }
-        if min_vaddr == u64::MAX { min_vaddr = 0; }
+        if min_vaddr == u64::MAX {
+            min_vaddr = 0;
+        }
         let total_size = ((max_vaddr - min_vaddr) as usize + 0xffff) & !0xffff;
 
-        let mut mapping = MmapOptions::new().len(total_size).map_anon()
+        let mut mapping = MmapOptions::new()
+            .len(total_size)
+            .map_anon()
             .map_err(|e| Pixel1Error::ElfLoad(format!("mmap: {e}")))?;
-        unsafe { self.mprotect_exec(mapping.as_mut_ptr(), total_size)?; }
+        unsafe {
+            self.mprotect_exec(mapping.as_mut_ptr(), total_size)?;
+        }
 
         for section in obj.sections() {
             if let Ok(d) = section.data() {
@@ -249,7 +280,8 @@ impl ApkElfExecutor {
         self.apply_relocations(soname, &obj, host_base, guest_base, min_vaddr, &mapping)?;
 
         self.report(0.75, "Resolving JNI_OnLoad…");
-        let jni_onload = obj.symbols()
+        let jni_onload = obj
+            .symbols()
             .find(|s| s.name().ok() == Some("JNI_OnLoad"))
             .map(|s| {
                 let offset = (s.address() - min_vaddr) as usize;
@@ -262,7 +294,9 @@ impl ApkElfExecutor {
 
         let entry = if obj.entry() != 0 {
             Some(guest_base + (obj.entry() - min_vaddr))
-        } else { None };
+        } else {
+            None
+        };
 
         info!(target: "hle::linker", "Mapped {} @ guest 0x{:x} / host {:p} (size 0x{:x})", soname, guest_base, host_base, total_size);
 
@@ -278,8 +312,13 @@ impl ApkElfExecutor {
     }
 
     fn apply_relocations(
-        &self, soname: &str, obj: &object::File<'_>,
-        host_base: *mut u8, guest_base: u64, min_vaddr: u64, mapping: &MmapMut,
+        &self,
+        soname: &str,
+        obj: &object::File<'_>,
+        host_base: *mut u8,
+        guest_base: u64,
+        min_vaddr: u64,
+        mapping: &MmapMut,
     ) -> Result<()> {
         if let Some(relocs) = obj.dynamic_relocations() {
             let count = relocs.count();
@@ -289,16 +328,22 @@ impl ApkElfExecutor {
         Ok(())
     }
 
-    unsafe fn mprotect_exec(&self, ptr: *mut u8, len: usize) -> Result<()> {
+    unsafe fn mprotect_exec(&self, _ptr: *mut u8, _len: usize) -> Result<()> {
         #[cfg(unix)]
         {
             let page_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
-            let start = (ptr as usize) & !(page_size - 1);
-            let end = (ptr as usize + len + page_size - 1) & !(page_size - 1);
-            let ret = libc::mprotect(start as *mut _, end - start,
-                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC);
+            let start = (_ptr as usize) & !(page_size - 1);
+            let end = (_ptr as usize + _len + page_size - 1) & !(page_size - 1);
+            let ret = libc::mprotect(
+                start as *mut _,
+                end - start,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+            );
             if ret != 0 {
-                return Err(Pixel1Error::ElfLoad(format!("mprotect: {}", std::io::Error::last_os_error())));
+                return Err(Pixel1Error::ElfLoad(format!(
+                    "mprotect: {}",
+                    std::io::Error::last_os_error()
+                )));
             }
         }
         Ok(())
@@ -340,6 +385,6 @@ impl ApkElfExecutor {
             }
         }
         error!(target: "hle::linker", "Symbol missing: {} (requested by {}) – safe stub", sym, from_soname);
-        unresolved_stub as usize
+        fn_addr(unresolved_stub)
     }
 }

@@ -16,8 +16,23 @@ pub use syscall::SyscallTranslator;
 pub use ui::{EmulatorState, SharedUi};
 
 use log::info;
+use serde::Deserialize;
 use std::path::Path;
 use std::sync::Arc;
+
+/// Top-level config file shape (device + hardware + …)
+#[derive(Debug, Deserialize)]
+struct RootConfig {
+    hardware: hardware::HardwareProfile,
+    #[serde(default)]
+    permissions: PermissionsCfg,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct PermissionsCfg {
+    #[serde(default)]
+    allowlist: Vec<String>,
+}
 
 pub struct Pixel1Translator {
     pub cpu: Arc<CpuRuntime>,
@@ -32,10 +47,10 @@ impl Pixel1Translator {
 
         let profile_str = std::fs::read_to_string(profile_path)
             .map_err(|e| Pixel1Error::Config(e.to_string()))?;
-        let profile: hardware::HardwareProfile = serde_yaml::from_str(&profile_str)
+        let root: RootConfig = serde_yaml::from_str(&profile_str)
             .map_err(|e| Pixel1Error::Config(e.to_string()))?;
 
-        let hw = HardwareStack::from_profile(profile)?;
+        let hw = HardwareStack::from_profile(root.hardware)?;
         hw.init_display()?;
         hw.init_audio()?;
 
@@ -44,12 +59,16 @@ impl Pixel1Translator {
 
         hardware::gles_bridge::register_gles_symbols(&cpu);
 
-        let allowlist = vec![
-            "android.permission.INTERNET".into(),
-            "android.permission.ACCESS_NETWORK_STATE".into(),
-            "android.permission.WAKE_LOCK".into(),
-            "android.permission.VIBRATE".into(),
-        ];
+        let allowlist = if root.permissions.allowlist.is_empty() {
+            vec![
+                "android.permission.INTERNET".into(),
+                "android.permission.ACCESS_NETWORK_STATE".into(),
+                "android.permission.WAKE_LOCK".into(),
+                "android.permission.VIBRATE".into(),
+            ]
+        } else {
+            root.permissions.allowlist
+        };
 
         let binder = Arc::new(BinderRuntime::new(hw.clone(), allowlist));
 
@@ -88,7 +107,8 @@ impl Pixel1Translator {
                 if should_load {
                     info!(target: "hle::display", "Background loader starting for {name}");
                     let executor = ApkElfExecutor::new(&path).with_ui(ui_clone.clone());
-                    let candidates = ["libunity.so", "libminecraftpe.so", "libmain.so", "libgame.so"];
+                    let candidates =
+                        ["libunity.so", "libminecraftpe.so", "libmain.so", "libgame.so"];
                     let mut loaded = false;
                     for eng in candidates {
                         match executor.bootstrap_engine(eng) {
@@ -126,9 +146,6 @@ impl Pixel1Translator {
             }
         });
 
-        // Pass log state into the UI loop via a side channel file path;
-        // the terminal reads from the global logger ring through logging::snapshot.
-        // We store a handle on the UI shared state indirectly via static once the logger is init.
         hardware::display::run_ui_loop(ui_shared, width, height)
     }
 

@@ -9,6 +9,7 @@ device:
   api_level: 25
   abi: arm64-v8a
 
+# Hardware block is what HardwareProfile deserializes
 hardware:
   display:
     width: 1920
@@ -30,10 +31,9 @@ hardware:
   battery:
     present: true
     capacity_mah: 2770
-    # Hardcoded permanent 100% + charging to kill doze/sleep loops
     force_full_and_charging: true
   camera:
-    present: false          # absent → hasSystemFeature("android.hardware.camera") == false
+    present: false
   fingerprint:
     present: false
   nfc:
@@ -41,12 +41,11 @@ hardware:
   bluetooth:
     present: false
   wifi:
-    present: true           # minimal mock
+    present: true
   gps:
     present: false
 
 permissions:
-  # deny-by-default policy. Only these can be granted if declared in manifest.
   allowlist:
     - android.permission.INTERNET
     - android.permission.ACCESS_NETWORK_STATE
