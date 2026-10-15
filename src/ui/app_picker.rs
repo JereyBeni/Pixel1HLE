@@ -11,7 +11,7 @@ impl AppPicker {
         let guard = shared.lock();
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(Color32::from_rgb(18, 18, 24)))
+            .frame(egui::Frame::none().fill(Color32::from_rgb(18, 18, 24)))
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(28.0);

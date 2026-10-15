@@ -16,7 +16,7 @@ impl BootAnimation {
         drop(guard);
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(Color32::from_rgb(0, 0, 0)))
+            .frame(egui::Frame::none().fill(Color32::from_rgb(0, 0, 0)))
             .show(ctx, |ui| {
                 let center = ui.available_rect_before_wrap().center();
                 let t = time as f32;

@@ -15,8 +15,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use zip::ZipArchive;
 
-fn fn_addr<F>(f: F) -> usize {
-    f as *const () as usize
+/// Safe-ish function-pointer → usize for the GOT/PLT hook table
+fn fn_addr(f: *const ()) -> usize {
+    f as usize
+}
+
+macro_rules! addr_of_fn {
+    ($f:expr) => {{
+        let p: *const () = $f as *const ();
+        fn_addr(p)
+    }};
 }
 
 #[derive(Debug)]
@@ -42,50 +50,50 @@ impl SymbolResolver {
         let mut table = HashMap::new();
 
         let mut egl = HashMap::new();
-        egl.insert("eglGetDisplay".into(), fn_addr(gles_bridge::eglGetDisplay));
-        egl.insert("eglInitialize".into(), fn_addr(gles_bridge::eglInitialize));
-        egl.insert("eglChooseConfig".into(), fn_addr(gles_bridge::eglChooseConfig));
+        egl.insert("eglGetDisplay".into(), addr_of_fn!(gles_bridge::eglGetDisplay));
+        egl.insert("eglInitialize".into(), addr_of_fn!(gles_bridge::eglInitialize));
+        egl.insert("eglChooseConfig".into(), addr_of_fn!(gles_bridge::eglChooseConfig));
         egl.insert(
             "eglCreateWindowSurface".into(),
-            fn_addr(gles_bridge::eglCreateWindowSurface),
+            addr_of_fn!(gles_bridge::eglCreateWindowSurface),
         );
-        egl.insert("eglCreateContext".into(), fn_addr(gles_bridge::eglCreateContext));
-        egl.insert("eglMakeCurrent".into(), fn_addr(gles_bridge::eglMakeCurrent));
-        egl.insert("eglSwapBuffers".into(), fn_addr(gles_bridge::eglSwapBuffers));
-        egl.insert("eglGetError".into(), fn_addr(gles_bridge::eglGetError));
-        egl.insert("eglTerminate".into(), fn_addr(gles_bridge::eglTerminate));
-        egl.insert("eglQueryString".into(), fn_addr(gles_bridge::eglQueryString));
+        egl.insert("eglCreateContext".into(), addr_of_fn!(gles_bridge::eglCreateContext));
+        egl.insert("eglMakeCurrent".into(), addr_of_fn!(gles_bridge::eglMakeCurrent));
+        egl.insert("eglSwapBuffers".into(), addr_of_fn!(gles_bridge::eglSwapBuffers));
+        egl.insert("eglGetError".into(), addr_of_fn!(gles_bridge::eglGetError));
+        egl.insert("eglTerminate".into(), addr_of_fn!(gles_bridge::eglTerminate));
+        egl.insert("eglQueryString".into(), addr_of_fn!(gles_bridge::eglQueryString));
         table.insert("libEGL.so".into(), egl);
 
         let mut gles = HashMap::new();
-        gles.insert("glViewport".into(), fn_addr(gles_bridge::glViewport));
-        gles.insert("glClear".into(), fn_addr(gles_bridge::glClear));
-        gles.insert("glClearColor".into(), fn_addr(gles_bridge::glClearColor));
-        gles.insert("glGenBuffers".into(), fn_addr(gles_bridge::glGenBuffers));
-        gles.insert("glBindBuffer".into(), fn_addr(gles_bridge::glBindBuffer));
-        gles.insert("glBufferData".into(), fn_addr(gles_bridge::glBufferData));
-        gles.insert("glDrawElements".into(), fn_addr(gles_bridge::glDrawElements));
-        gles.insert("glEnable".into(), fn_addr(gles_bridge::glEnable));
-        gles.insert("glDisable".into(), fn_addr(gles_bridge::glDisable));
-        gles.insert("glGetError".into(), fn_addr(gles_bridge::glGetError));
-        gles.insert("glGetString".into(), fn_addr(gles_bridge::glGetString));
-        gles.insert("glPixelStorei".into(), fn_addr(gles_bridge::glPixelStorei));
-        gles.insert("glHint".into(), fn_addr(gles_bridge::glHint));
-        gles.insert("glDepthMask".into(), fn_addr(gles_bridge::glDepthMask));
-        gles.insert("glColorMask".into(), fn_addr(gles_bridge::glColorMask));
-        gles.insert("glBlendFunc".into(), fn_addr(gles_bridge::glBlendFunc));
-        gles.insert("glCullFace".into(), fn_addr(gles_bridge::glCullFace));
-        gles.insert("glFrontFace".into(), fn_addr(gles_bridge::glFrontFace));
+        gles.insert("glViewport".into(), addr_of_fn!(gles_bridge::glViewport));
+        gles.insert("glClear".into(), addr_of_fn!(gles_bridge::glClear));
+        gles.insert("glClearColor".into(), addr_of_fn!(gles_bridge::glClearColor));
+        gles.insert("glGenBuffers".into(), addr_of_fn!(gles_bridge::glGenBuffers));
+        gles.insert("glBindBuffer".into(), addr_of_fn!(gles_bridge::glBindBuffer));
+        gles.insert("glBufferData".into(), addr_of_fn!(gles_bridge::glBufferData));
+        gles.insert("glDrawElements".into(), addr_of_fn!(gles_bridge::glDrawElements));
+        gles.insert("glEnable".into(), addr_of_fn!(gles_bridge::glEnable));
+        gles.insert("glDisable".into(), addr_of_fn!(gles_bridge::glDisable));
+        gles.insert("glGetError".into(), addr_of_fn!(gles_bridge::glGetError));
+        gles.insert("glGetString".into(), addr_of_fn!(gles_bridge::glGetString));
+        gles.insert("glPixelStorei".into(), addr_of_fn!(gles_bridge::glPixelStorei));
+        gles.insert("glHint".into(), addr_of_fn!(gles_bridge::glHint));
+        gles.insert("glDepthMask".into(), addr_of_fn!(gles_bridge::glDepthMask));
+        gles.insert("glColorMask".into(), addr_of_fn!(gles_bridge::glColorMask));
+        gles.insert("glBlendFunc".into(), addr_of_fn!(gles_bridge::glBlendFunc));
+        gles.insert("glCullFace".into(), addr_of_fn!(gles_bridge::glCullFace));
+        gles.insert("glFrontFace".into(), addr_of_fn!(gles_bridge::glFrontFace));
         table.insert("libGLESv2.so".into(), gles.clone());
         table.insert("libGLESv3.so".into(), gles);
 
         let mut bionic = HashMap::new();
-        bionic.insert("__errno".into(), fn_addr(stub_errno));
-        bionic.insert("malloc".into(), fn_addr(stub_malloc));
-        bionic.insert("free".into(), fn_addr(stub_free));
-        bionic.insert("memcpy".into(), fn_addr(stub_memcpy));
-        bionic.insert("memset".into(), fn_addr(stub_memset));
-        bionic.insert("strlen".into(), fn_addr(stub_strlen));
+        bionic.insert("__errno".into(), addr_of_fn!(stub_errno));
+        bionic.insert("malloc".into(), addr_of_fn!(stub_malloc));
+        bionic.insert("free".into(), addr_of_fn!(stub_free));
+        bionic.insert("memcpy".into(), addr_of_fn!(stub_memcpy));
+        bionic.insert("memset".into(), addr_of_fn!(stub_memset));
+        bionic.insert("strlen".into(), addr_of_fn!(stub_strlen));
         table.insert("libc.so".into(), bionic);
 
         Self { table }
@@ -385,6 +393,6 @@ impl ApkElfExecutor {
             }
         }
         error!(target: "hle::linker", "Symbol missing: {} (requested by {}) – safe stub", sym, from_soname);
-        fn_addr(unresolved_stub)
+        addr_of_fn!(unresolved_stub)
     }
 }

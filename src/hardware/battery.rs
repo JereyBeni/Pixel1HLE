@@ -1,7 +1,4 @@
 //! Hardcoded permanent 100 % + charging
-//! Prevents any background app from entering doze / sleep loops.
-
-use log::debug;
 
 pub struct BatteryMock {
     force_full: bool,
@@ -14,12 +11,11 @@ impl BatteryMock {
         }
     }
 
-    /// What the framework BatteryService returns
     pub fn get_level(&self) -> i32 {
         if self.force_full {
             100
         } else {
-            87 // whatever
+            87
         }
     }
 
@@ -28,11 +24,10 @@ impl BatteryMock {
     }
 
     pub fn get_status(&self) -> i32 {
-        // BatteryManager.BATTERY_STATUS_CHARGING == 2
         if self.force_full {
             2
         } else {
-            3 // discharging
+            3
         }
     }
 }
