@@ -222,6 +222,24 @@ impl winit::application::ApplicationHandler for AppState {
     }
 }
 
+/// Scale portrait phone resolution so it fits a typical desktop monitor.
+fn fit_portrait_window(width: u32, height: u32) -> (u32, u32) {
+    let mut w = width.max(320);
+    let mut h = height.max(480);
+    // Prefer portrait: if landscape profile slipped in, swap
+    if w > h {
+        std::mem::swap(&mut w, &mut h);
+    }
+    // Cap height for desktop windows (~900px)
+    const MAX_H: u32 = 900;
+    if h > MAX_H {
+        let scale = MAX_H as f32 / h as f32;
+        h = MAX_H;
+        w = ((w as f32) * scale).round() as u32;
+    }
+    (w.max(320), h.max(480))
+}
+
 fn create_display(
     event_loop: &winit::event_loop::ActiveEventLoop,
     width: u32,
@@ -237,12 +255,12 @@ fn create_display(
     use winit::dpi::PhysicalSize;
     use winit::window::WindowAttributes;
 
-    let width = width.min(1920).max(320);
-    let height = height.min(1080).max(240);
+    let (width, height) = fit_portrait_window(width, height);
+    info!(target: "hle::display", "Window size (portrait): {width}x{height}");
 
     let window_attrs = WindowAttributes::default()
         .with_inner_size(PhysicalSize::new(width, height))
-        .with_title("Pixel1HLE – sailfish")
+        .with_title("Pixel1HLE – sailfish (portrait)")
         .with_resizable(true);
 
     let template = ConfigTemplateBuilder::new().with_alpha_size(8);
