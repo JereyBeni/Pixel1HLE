@@ -178,7 +178,7 @@ impl winit::application::ApplicationHandler for AppState {
                 }
 
                 unsafe {
-                    gl.clear_color(0.05, 0.05, 0.08, 1.0);
+                    gl.clear_color(0.06, 0.07, 0.09, 1.0);
                     gl.clear(glow::COLOR_BUFFER_BIT);
                 }
 
@@ -222,22 +222,34 @@ impl winit::application::ApplicationHandler for AppState {
     }
 }
 
-/// Scale portrait phone resolution so it fits a typical desktop monitor.
-fn fit_portrait_window(width: u32, height: u32) -> (u32, u32) {
+/// Compact desktop window: phone-like portrait but dense (~420×720).
+/// Full sailfish 1080×1920 is reserved for Android / game surface.
+fn fit_compact_window(width: u32, height: u32) -> (u32, u32) {
     let mut w = width.max(320);
     let mut h = height.max(480);
-    // Prefer portrait: if landscape profile slipped in, swap
     if w > h {
         std::mem::swap(&mut w, &mut h);
     }
-    // Cap height for desktop windows (~900px)
-    const MAX_H: u32 = 900;
-    if h > MAX_H {
-        let scale = MAX_H as f32 / h as f32;
-        h = MAX_H;
-        w = ((w as f32) * scale).round() as u32;
+
+    // Desktop launcher: fixed compact size so panels never stretch ultra-wide
+    #[cfg(not(target_os = "android"))]
+    {
+        const DESKTOP_W: u32 = 420;
+        const DESKTOP_H: u32 = 720;
+        return (DESKTOP_W, DESKTOP_H);
     }
-    (w.max(320), h.max(480))
+
+    // Android: keep aspect, mild cap
+    #[cfg(target_os = "android")]
+    {
+        const MAX_H: u32 = 1280;
+        if h > MAX_H {
+            let scale = MAX_H as f32 / h as f32;
+            h = MAX_H;
+            w = ((w as f32) * scale).round() as u32;
+        }
+        (w.max(320), h.max(480))
+    }
 }
 
 fn create_display(
@@ -255,13 +267,14 @@ fn create_display(
     use winit::dpi::PhysicalSize;
     use winit::window::WindowAttributes;
 
-    let (width, height) = fit_portrait_window(width, height);
-    info!(target: "hle::display", "Window size (portrait): {width}x{height}");
+    let (width, height) = fit_compact_window(width, height);
+    info!(target: "hle::display", "Window size (compact): {width}x{height}");
 
     let window_attrs = WindowAttributes::default()
         .with_inner_size(PhysicalSize::new(width, height))
-        .with_title("Pixel1HLE – sailfish (portrait)")
-        .with_resizable(true);
+        .with_title("Pixel1HLE")
+        .with_resizable(true)
+        .with_min_inner_size(PhysicalSize::new(360, 560));
 
     let template = ConfigTemplateBuilder::new().with_alpha_size(8);
     let display_builder = DisplayBuilder::new().with_window_attributes(Some(window_attrs));
