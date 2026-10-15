@@ -3,7 +3,7 @@ name: Build & Release
 on:
   push:
     branches:
-      - '**'          # every commit on every branch
+      - '**'
     tags:
       - 'v*'
   pull_request:
@@ -25,188 +25,124 @@ env:
 
 jobs:
   # ─────────────────────────────────────────────────────────────
-  # Windows executable package – runs on EVERY commit
+  # Windows executable
   # ─────────────────────────────────────────────────────────────
   windows:
     name: Windows (x86_64)
     runs-on: windows-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
 
       - name: Build release
         run: cargo build --release --features loader
         env:
           RUSTFLAGS: "-C target-feature=+crt-static"
 
-      - name: Assemble distribution workspace
+      - name: Package
         shell: pwsh
         run: |
           $Out = "dist/pixel1-translator-windows-x86_64"
-          New-Item -ItemType Directory -Force -Path $Out | Out-Null
-          New-Item -ItemType Directory -Force -Path "$Out/config" | Out-Null
-          New-Item -ItemType Directory -Force -Path "$Out/apps" | Out-Null
-          New-Item -ItemType Directory -Force -Path "$Out/fonts" | Out-Null
-          New-Item -ItemType Directory -Force -Path "$Out/assets" | Out-Null
-
-          Copy-Item "target/release/pixel1-translator.exe" "$Out/pixel1-translator.exe"
-          Copy-Item "config/pixel1-sailfish.yaml" "$Out/config/pixel1-sailfish.yaml"
-
-          Set-Content -Path "$Out/apps/README.txt" -Value "Drop your .apk files here. The AppPicker will pick them up automatically.`nYou can also use the 'Import ya!' button inside the emulator."
-          Set-Content -Path "$Out/fonts/README.txt" -Value "Optional custom fonts for the egui UI."
-          Set-Content -Path "$Out/assets/README.txt" -Value "Optional UI graphics / icons."
-
+          New-Item -ItemType Directory -Force -Path "$Out/config","$Out/apps","$Out/fonts","$Out/assets","$Out/logs" | Out-Null
+          Copy-Item "target/release/pixel1-translator.exe" "$Out/"
+          Copy-Item "config/pixel1-sailfish.yaml" "$Out/config/"
+          Set-Content "$Out/apps/README.txt" "Drop APKs here or use Import ya!"
           $Version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "dev-$(Get-Date -Format yyyyMMdd-HHmm)" }
-          Set-Content -Path "$Out/VERSION.txt" -Value $Version
+          Set-Content "$Out/VERSION.txt" $Version
+          Compress-Archive -Path "$Out/*" -DestinationPath "dist/pixel1-translator-windows-x86_64.zip" -Force
 
-      - name: Zip Windows package
-        shell: pwsh
-        run: |
-          Compress-Archive -Path "dist/pixel1-translator-windows-x86_64/*" `
-                           -DestinationPath "dist/pixel1-translator-windows-x86_64.zip" `
-                           -Force
-
-      - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: windows-x86_64
           path: dist/pixel1-translator-windows-x86_64.zip
           retention-days: 7
 
   # ─────────────────────────────────────────────────────────────
-  # Android / Linux runtime package – runs on EVERY commit
+  # Real Android APK (Gradle)
   # ─────────────────────────────────────────────────────────────
-  android:
-    name: Android runtime package
+  android-apk:
+    name: Android APK
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install system dependencies (ALSA + X11/Wayland for cpal/winit)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libasound2-dev \
-            libudev-dev \
-            pkg-config \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            libxkbcommon-dev \
-            libssl-dev \
-            libwayland-dev \
-            libx11-dev \
-            libxcursor-dev \
-            libxrandr-dev \
-            libxi-dev
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
-          targets: aarch64-linux-android,x86_64-linux-android
+          distribution: 'temurin'
+          java-version: '17'
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
-      - name: Build host release (reference binary)
-        run: cargo build --release --features loader
-
-      - name: Assemble Android sandbox layout
+      - name: Accept licenses
         run: |
-          OUT=dist/pixel1-hle-android
-          mkdir -p "$OUT/Android/data/com.pixel.hle"/{config,apps,fonts,assets,cache,logs}
+          yes | sdkmanager --licenses || true
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
 
-          cp config/pixel1-sailfish.yaml "$OUT/Android/data/com.pixel.hle/config/"
+      - name: Copy sailfish profile into APK assets
+        run: |
+          mkdir -p android/app/src/main/assets
+          cp config/pixel1-sailfish.yaml android/app/src/main/assets/
 
-          cat > "$OUT/Android/data/com.pixel.hle/ANDROID_SANDBOX" << 'EOF'
-          # Pixel1HLE Android sandbox marker
-          # All reads/writes must stay under this directory.
-          # Package name: com.pixel.hle
-          EOF
-
-          cat > "$OUT/AndroidManifest.xml" << 'EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-              package="com.pixel.hle"
-              android:versionCode="1"
-              android:versionName="0.1.0">
-              <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="25" />
-              <application
-                  android:label="Pixel1HLE"
-                  android:hasCode="true"
-                  android:extractNativeLibs="true">
-                  <activity android:name=".MainActivity"
-                      android:exported="true"
-                      android:screenOrientation="landscape"
-                      android:configChanges="orientation|screenSize|keyboardHidden">
-                      <intent-filter>
-                          <action android:name="android.intent.action.MAIN" />
-                          <category android:name="android.intent.category.LAUNCHER" />
-                      </intent-filter>
-                  </activity>
-              </application>
-          </manifest>
-          EOF
-
-          echo "Drop guest .apk files into apps/" > "$OUT/Android/data/com.pixel.hle/apps/README.txt"
-          echo "Optional fonts" > "$OUT/Android/data/com.pixel.hle/fonts/README.txt"
-          echo "Optional assets" > "$OUT/Android/data/com.pixel.hle/assets/README.txt"
-
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            echo "${{ github.ref_name }}" > "$OUT/VERSION.txt"
-          else
-            echo "dev-$(date +%Y%m%d-%H%M)" > "$OUT/VERSION.txt"
+      - name: Setup Gradle wrapper
+        working-directory: android
+        run: |
+          gradle wrapper --gradle-version 8.5 || true
+          if [ ! -f gradlew ]; then
+            # bootstrap wrapper if gradle not installed globally
+            curl -sL https://services.gradle.org/distributions/gradle-8.5-bin.zip -o /tmp/gradle.zip
+            sudo unzip -q /tmp/gradle.zip -d /opt
+            /opt/gradle-8.5/bin/gradle wrapper --gradle-version 8.5
           fi
+          chmod +x gradlew
 
-          mkdir -p "$OUT/bin"
-          cp target/release/pixel1-translator "$OUT/bin/" || true
-
-      - name: Zip Android package
+      - name: Build debug APK
+        working-directory: android
         run: |
-          cd dist
-          zip -r pixel1-hle-android.zip pixel1-hle-android
+          ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: Upload Android artifact
-        uses: actions/upload-artifact@v4
+      - name: Collect APK
+        run: |
+          mkdir -p dist
+          APK=$(find android/app/build/outputs/apk -name "*.apk" | head -n1)
+          echo "Found APK: $APK"
+          cp "$APK" dist/pixel1-hle.apk
+          ls -lh dist/pixel1-hle.apk
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: android-runtime
-          path: dist/pixel1-hle-android.zip
-          retention-days: 7
+          name: android-apk
+          path: dist/pixel1-hle.apk
+          retention-days: 14
 
   # ─────────────────────────────────────────────────────────────
-  # Publish GitHub Release (draft) – ONLY on tags / manual dispatch
+  # Publish release (tags / manual only)
   # ─────────────────────────────────────────────────────────────
   release:
     name: Publish Release
-    needs: [windows, android]
+    needs: [windows, android-apk]
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Download Windows artifact
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: windows-x86_64
           path: artifacts
 
-      - name: Download Android artifact
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: android-runtime
+          name: android-apk
           path: artifacts
 
-      - name: Determine tag name
+      - name: Tag name
         id: tag
         run: |
           if [ "${{ github.ref_type }}" = "tag" ]; then
@@ -217,8 +153,7 @@ jobs:
             echo "name=dev-$(date +%Y%m%d-%H%M)" >> $GITHUB_OUTPUT
           fi
 
-      - name: Create GitHub Release (draft)
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.name }}
           name: Pixel1HLE ${{ steps.tag.outputs.name }}
@@ -226,14 +161,15 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/pixel1-translator-windows-x86_64.zip
-            artifacts/pixel1-hle-android.zip
+            artifacts/pixel1-hle.apk
           body: |
             ## Pixel1HLE ${{ steps.tag.outputs.name }}
 
-            ### Windows package
-            - Extract `pixel1-translator-windows-x86_64.zip`
-            - Run `pixel1-translator.exe`
-            - Drop guest APKs into the `apps/` folder **or** use the **Import ya!** button
+            ### Windows
+            - `pixel1-translator-windows-x86_64.zip` → run `pixel1-translator.exe`
 
-            ### Android runtime package
-            - Layout: `Android/data/com.pixel.hle/{config,apps,fonts,assets,cache,logs}`
+            ### Android APK
+            - Install `pixel1-hle.apk` (debug build)
+            - Package: `com.pixel.hle`
+            - Use **Import ya!** to pick guest APKs
+            - Data: `Android/data/com.pixel.hle/` (app external files dir)
