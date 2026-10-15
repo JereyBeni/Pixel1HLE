@@ -5,14 +5,14 @@
 //! - Apply a **bounded** set of AArch64 RELA types into the image.
 //! - Resolve symbols against an external callback (host HLE stubs).
 //!
-//! It does **not** execute guest instructions. HyperHLE’s pattern of a
+//! It does **not** execute guest instructions. HyperHLE's pattern of a
 //! Dynarmic-backed CPU frontend is the intended next integration (MPL-2.0
 //! Dynarmic itself is **not** vendored here).
 
 use crate::error::{Pixel1Error, Result};
 use log::{debug, info, warn};
 use object::elf;
-use object::read::elf::{ElfFile64, FileHeader as _, ProgramHeader as _, Rela as _, Sym as _};
+use object::read::elf::{ElfFile64, FileHeader as _, ProgramHeader as _, Rela as _};
 use object::Endianness;
 use object::Object;
 use object::ObjectSymbol;
@@ -91,7 +91,6 @@ impl LoadedImage {
 
 /// Load an ELF64 little-endian AArch64 shared object / executable from bytes.
 pub fn load_elf64_aarch64(data: &[u8], lookup: &SymbolLookup) -> Result<LoadedImage> {
-    // Validate with object’s high-level API first
     let file = object::File::parse(data)
         .map_err(|e| Pixel1Error::ElfLoad(format!("ELF parse: {e}")))?;
     if file.architecture() != object::Architecture::Aarch64 {
@@ -104,7 +103,6 @@ pub fn load_elf64_aarch64(data: &[u8], lookup: &SymbolLookup) -> Result<LoadedIm
         return Err(Pixel1Error::ElfLoad("expected little-endian ELF".into()));
     }
 
-    // Use typed ELF64 view for program headers + RELA
     let elf: ElfFile64<'_, Endianness> = ElfFile64::parse(data)
         .map_err(|e| Pixel1Error::ElfLoad(format!("ElfFile64: {e}")))?;
     let endian = elf.endian();
@@ -114,9 +112,10 @@ pub fn load_elf64_aarch64(data: &[u8], lookup: &SymbolLookup) -> Result<LoadedIm
     let mut min_vaddr = u64::MAX;
     let mut max_vaddr = 0u64;
 
-    for ph in header.program_headers(endian, data).map_err(|e| {
-        Pixel1Error::ElfLoad(format!("program_headers: {e}"))
-    })? {
+    for ph in header
+        .program_headers(endian, data)
+        .map_err(|e| Pixel1Error::ElfLoad(format!("program_headers: {e}")))?
+    {
         let p_type = ph.p_type(endian);
         if p_type != elf::PT_LOAD {
             continue;
@@ -135,9 +134,9 @@ pub fn load_elf64_aarch64(data: &[u8], lookup: &SymbolLookup) -> Result<LoadedIm
                 "PT_LOAD filesz 0x{p_filesz:x} > memsz 0x{p_memsz:x}"
             )));
         }
-        let end = p_vaddr.checked_add(p_memsz).ok_or_else(|| {
-            Pixel1Error::ElfLoad("PT_LOAD vaddr overflow".into())
-        })?;
+        let end = p_vaddr
+            .checked_add(p_memsz)
+            .ok_or_else(|| Pixel1Error::ElfLoad("PT_LOAD vaddr overflow".into()))?;
         min_vaddr = min_vaddr.min(p_vaddr);
         max_vaddr = max_vaddr.max(end);
         segments.push(LoadSegment {
@@ -156,7 +155,6 @@ pub fn load_elf64_aarch64(data: &[u8], lookup: &SymbolLookup) -> Result<LoadedIm
         return Err(Pixel1Error::ElfLoad("invalid PT_LOAD range".into()));
     }
 
-    // Page-align the host buffer extent
     const PAGE: u64 = 0x1000;
     let aligned_min = min_vaddr & !(PAGE - 1);
     let aligned_max = (max_vaddr + PAGE - 1) & !(PAGE - 1);
@@ -174,30 +172,32 @@ pub fn load_elf64_aarch64(data: &[u8], lookup: &SymbolLookup) -> Result<LoadedIm
         let file_off = seg.p_offset as usize;
         let copy_n = seg.p_filesz as usize;
         if copy_n > 0 {
-            if file_off.checked_add(copy_n).map(|e| e > data.len()).unwrap_or(true) {
+            if file_off
+                .checked_add(copy_n)
+                .map(|e| e > data.len())
+                .unwrap_or(true)
+            {
                 return Err(Pixel1Error::ElfLoad(format!(
                     "PT_LOAD file range out of bounds (off=0x{file_off:x} n=0x{copy_n:x})"
                 )));
             }
-            if dest_off.checked_add(copy_n).map(|e| e > image.len()).unwrap_or(true) {
+            if dest_off
+                .checked_add(copy_n)
+                .map(|e| e > image.len())
+                .unwrap_or(true)
+            {
                 return Err(Pixel1Error::ElfLoad("PT_LOAD dest out of image".into()));
             }
             image[dest_off..dest_off + copy_n]
                 .copy_from_slice(&data[file_off..file_off + copy_n]);
         }
-        // BSS already zeroed by vec![0; …]
     }
 
     let entry_raw = header.e_entry(endian);
-    let entry = if entry_raw != 0 {
-        // PIE/shared objects often use vaddr-relative entry; keep absolute VA
-        entry_raw
-    } else {
-        0
-    };
+    let entry = if entry_raw != 0 { entry_raw } else { 0 };
 
     let mut loaded = LoadedImage {
-        load_bias: aligned_min, // for ET_DYN with vaddr starting at 0, bias is allocation base
+        load_bias: aligned_min,
         image,
         min_vaddr: aligned_min,
         max_vaddr: aligned_max,
@@ -208,7 +208,6 @@ pub fn load_elf64_aarch64(data: &[u8], lookup: &SymbolLookup) -> Result<LoadedIm
         skipped_relas: 0,
     };
 
-    // Collect dynamic symbols for name lookup
     let mut dyn_names: HashMap<usize, String> = HashMap::new();
     for (i, sym) in file.symbols().enumerate() {
         if let Ok(name) = sym.name() {
@@ -252,40 +251,32 @@ fn apply_rela(
 ) -> Result<()> {
     let endian = elf.endian();
 
-    // object 0.36: dynamic_relocations on File is easier for mixed REL/RELA
-    // Fall back to walking DT_RELA via high-level API when possible.
-    let file = object::File::parse(data)
-        .map_err(|e| Pixel1Error::ElfLoad(format!("reparse: {e}")))?;
-
-    if let Some(relocs) = file.dynamic_relocations() {
-        for (offset, reloc) in relocs {
-            let r_type = reloc.kind();
-            let addend = reloc.addend() as u64;
-            // Map object’s RelocationKind to AArch64 semantics is lossy;
-            // use raw ELF rela when available via elf section.
-            let _ = (offset, r_type, addend);
-        }
-    }
-
-    // Prefer explicit SHT_RELA sections
-    for section in elf.sections().map_err(|e| Pixel1Error::ElfLoad(format!("{e}")))? {
+    // Walk SHT_RELA sections. `sections()` returns an iterator (not Result).
+    for section in elf.sections() {
         let sh_type = section.sh_type(endian);
         if sh_type != elf::SHT_RELA {
             continue;
         }
-        let content = section.data(endian, data)
-            .map_err(|e| Pixel1Error::ElfLoad(format!("rela data: {e}")))?;
-        let rela_iter = section.rela(endian, content)
-            .map_err(|e| Pixel1Error::ElfLoad(format!("rela parse: {e}")))?;
+        let content = match section.data(endian, data) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(target: "hle::elf", "rela section data: {e}");
+                continue;
+            }
+        };
+        let rela_iter = match section.rela(endian, content) {
+            Ok(it) => it,
+            Err(e) => {
+                warn!(target: "hle::elf", "rela parse: {e}");
+                continue;
+            }
+        };
 
         for rela in rela_iter {
             let r_offset = rela.r_offset(endian);
             let r_type = rela.r32_type(endian);
             let r_sym = rela.r_sym(endian) as usize;
             let r_addend = rela.r_addend(endian) as u64;
-
-            // For ET_DYN linked at min_vaddr, absolute guest address of the
-            // relocation slot is r_offset (already a vaddr in Android DSOs).
             let slot_va = r_offset;
 
             match r_type {
@@ -293,8 +284,7 @@ fn apply_rela(
                     loaded.skipped_relas += 1;
                 }
                 R_AARCH64_RELATIVE => {
-                    // B + A  (B = load bias / base). Android ET_DYN usually
-                    // linked at 0; our image is placed at min_vaddr.
+                    // B + A
                     let value = loaded.min_vaddr.wrapping_add(r_addend);
                     loaded.write_u64(slot_va, value)?;
                     loaded.applied_relas += 1;
@@ -331,12 +321,12 @@ fn apply_rela(
 
 /// Trait for a future AArch64 execution backend (Dynarmic / Unicorn / …).
 ///
-//! HyperHLE uses Dynarmic via a C++ wrapper (MPL-2.0). Pixel1HLE does **not**
-//! vendor that code; integrators must supply a backend that implements this
-//! interface and respects guest memory isolation.
+/// HyperHLE uses Dynarmic via a C++ wrapper (MPL-2.0). Pixel1HLE does **not**
+/// vendor that code; integrators must supply a backend that implements this
+/// interface and respects guest memory isolation.
 pub trait AArch64Backend {
     fn name(&self) -> &str;
-    /// Map a host-backed guest image into the backend’s address space.
+    /// Map a host-backed guest image into the backend's address space.
     fn map_image(&mut self, guest_base: u64, bytes: &[u8]) -> Result<()>;
     /// Execute at guest PC until halt/fault. Returns final PC.
     fn run(&mut self, entry: u64) -> Result<u64>;
@@ -368,10 +358,9 @@ impl AArch64Backend for NullAArch64Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use object::write::{self, SectionKind, SymbolKind, SymbolScope, SymbolSection};
+    use object::write::{self, SectionKind};
     use object::{Architecture, BinaryFormat, Endianness as WriteEndian};
 
-    /// Build a minimal ET_DYN AArch64 ELF with one PT_LOAD and one RELATIVE rela.
     fn make_test_elf() -> Vec<u8> {
         let mut obj = write::Object::new(
             BinaryFormat::Elf,
@@ -385,7 +374,6 @@ mod tests {
         };
 
         let text = obj.add_section(Vec::new(), b".text".to_vec(), SectionKind::Text);
-        // four NOPs as placeholder "code"
         let nop = [0x1f, 0x20, 0x03, 0xd5u8];
         let mut code = Vec::new();
         for _ in 0..4 {
@@ -393,9 +381,6 @@ mod tests {
         }
         obj.append_section_data(text, &code, 4);
 
-        // A data word that will receive a RELATIVE fixup target for tests is
-        // hard to emit portably via object::write without full dynamic tables.
-        // We still verify PT_LOAD mapping of .text.
         let mut out = Vec::new();
         obj.write_stream(&mut out).expect("write elf");
         out
@@ -413,9 +398,10 @@ mod tests {
         let img = load_elf64_aarch64(&data, &|_| None).expect("load");
         assert!(!img.segments.is_empty(), "expected PT_LOAD");
         assert!(img.image.len() >= 16);
-        // First bytes of image at min_vaddr should include our NOPs somewhere
-        // in the first load segment file range.
-        let has_nop = img.image.windows(4).any(|w| w == [0x1f, 0x20, 0x03, 0xd5]);
+        let has_nop = img
+            .image
+            .windows(4)
+            .any(|w| w == [0x1f, 0x20, 0x03, 0xd5]);
         assert!(has_nop, "mapped image should contain A64 NOP");
     }
 
