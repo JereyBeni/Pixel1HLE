@@ -1,5 +1,4 @@
-//! State-driven GUI for Pixel1HLE
-//! AppPicker → BootAnimation → ApkLoading → GameRunning + Terminal
+//! State-driven GUI – portrait Android home launcher
 
 mod app_picker;
 mod boot_animation;
@@ -35,8 +34,9 @@ pub struct UiSharedState {
     pub loading_status: String,
     pub available_apks: Vec<ApkEntry>,
     pub selected_apk: Option<String>,
-    /// Terminal panel visible
     pub terminal_open: bool,
+    /// Current page of the home-screen icon grid
+    pub picker_page: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -54,7 +54,8 @@ impl Default for UiSharedState {
             loading_status: String::new(),
             available_apks: Vec::new(),
             selected_apk: None,
-            terminal_open: true, // open by default so user sees logs
+            terminal_open: false,
+            picker_page: 0,
         }
     }
 }

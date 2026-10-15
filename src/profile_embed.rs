@@ -1,4 +1,4 @@
-//! Embedded sailfish profile so Android / missing-file boots still work
+//! Embedded sailfish profile (portrait 1080×1920)
 
 pub const SAILFISH_YAML: &str = r#"
 device:
@@ -11,8 +11,8 @@ device:
 
 hardware:
   display:
-    width: 1280
-    height: 720
+    width: 1080
+    height: 1920
     ppi: 441
     refresh_hz: 60
     present: true

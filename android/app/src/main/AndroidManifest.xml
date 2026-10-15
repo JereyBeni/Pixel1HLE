@@ -16,11 +16,10 @@
         android:hasCode="false"
         android:theme="@style/Theme.Pixel1HLE">
 
-        <!-- Pure Rust NativeActivity – no Java Activity code -->
         <activity
             android:name="android.app.NativeActivity"
             android:exported="true"
-            android:screenOrientation="sensorLandscape"
+            android:screenOrientation="portrait"
             android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|uiMode"
             android:launchMode="singleTask">
             <meta-data
