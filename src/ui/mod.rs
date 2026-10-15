@@ -1,12 +1,14 @@
-//! State-driven GUI – portrait Android home launcher
+//! State-driven GUI – HyperHLE-style technical shell
 
 mod app_picker;
 mod boot_animation;
+mod file_explorer;
 mod loading_screen;
 mod terminal;
 
 pub use app_picker::AppPicker;
 pub use boot_animation::BootAnimation;
+pub use file_explorer::FileExplorer;
 pub use loading_screen::LoadingScreen;
 pub use terminal::TerminalPanel;
 
@@ -35,8 +37,10 @@ pub struct UiSharedState {
     pub available_apks: Vec<ApkEntry>,
     pub selected_apk: Option<String>,
     pub terminal_open: bool,
-    /// Current page of the home-screen icon grid
     pub picker_page: usize,
+    /// Host file explorer (HyperHLE-style)
+    pub explorer: FileExplorer,
+    pub show_explorer: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -54,8 +58,10 @@ impl Default for UiSharedState {
             loading_status: String::new(),
             available_apks: Vec::new(),
             selected_apk: None,
-            terminal_open: false,
+            terminal_open: true,
             picker_page: 0,
+            explorer: FileExplorer::default(),
+            show_explorer: true,
         }
     }
 }

@@ -1,8 +1,8 @@
 //! CPU & Binary Loader + HLE Dynamic Linker
 
-mod linker;
+pub mod linker;
 
-pub use linker::{ApkElfExecutor, LoadedLibrary, SymbolResolver};
+pub use linker::{ApkElfExecutor, LoadedLibrary, SymbolResolver, ENGINE_CANDIDATES};
 
 use crate::error::{Pixel1Error, Result};
 use log::{debug, info};
@@ -60,8 +60,10 @@ impl CpuRuntime {
         let obj = object::File::parse(&*mmap)
             .map_err(|e| Pixel1Error::ElfLoad(format!("parse: {e}")))?;
 
-        if obj.architecture() != object::Architecture::Aarch64 {
-            return Err(Pixel1Error::ElfLoad("not ARM64".into()));
+        if obj.architecture() != object::Architecture::Aarch64
+            && obj.architecture() != object::Architecture::Arm
+        {
+            return Err(Pixel1Error::ElfLoad("not ARM/ARM64".into()));
         }
 
         let mut guest_base = *self.next_guest_base.read();
@@ -144,7 +146,7 @@ impl CpuRuntime {
     }
 
     pub fn demo_unity_graphics_bootstrap(&self) {
-        info!(target: "hle::gles", "CPU: simulating Unity graphics bootstrap cascade");
+        info!(target: "hle::gles", "CPU: simulating Unity/AIR graphics bootstrap cascade");
 
         unsafe {
             let display = crate::hardware::gles_bridge::eglGetDisplay(std::ptr::null_mut());
@@ -180,25 +182,12 @@ impl CpuRuntime {
         }
 
         unsafe {
-            crate::hardware::gles_bridge::glViewport(0, 0, 1920, 1080);
+            crate::hardware::gles_bridge::glViewport(0, 0, 1080, 1920);
             crate::hardware::gles_bridge::glClearColor(0.1, 0.2, 0.3, 1.0);
             crate::hardware::gles_bridge::glClear(0x00004000 | 0x00000100);
         }
 
-        unsafe {
-            let mut buf = 0u32;
-            crate::hardware::gles_bridge::glGenBuffers(1, &mut buf);
-            crate::hardware::gles_bridge::glBindBuffer(0x8892, buf);
-            let dummy: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
-            crate::hardware::gles_bridge::glBufferData(
-                0x8892,
-                16,
-                dummy.as_ptr() as *const _,
-                0x88E4,
-            );
-        }
-
-        info!(target: "hle::gles", "CPU: Unity bootstrap cascade completed – no faults");
+        info!(target: "hle::gles", "CPU: graphics bootstrap cascade completed – no faults");
     }
 }
 

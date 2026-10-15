@@ -1,4 +1,5 @@
 //! pixel1-translator – Full HLE with UI (desktop + Android NativeActivity)
+//! Engines: Unity, Minecraft PE, Adobe AIR (`libcom_adobe_air.so`)
 
 pub mod binder;
 pub mod cpu;
@@ -85,10 +86,14 @@ impl Pixel1Translator {
     }
 
     pub fn run_ui(self) -> Result<()> {
-        self.run_ui_with_event_loop(None)
+        self.run_ui_with_event_loop(
+            #[cfg(target_os = "android")]
+            None,
+            #[cfg(not(target_os = "android"))]
+            None,
+        )
     }
 
-    /// `android_app` is Some only on Android NativeActivity
     pub fn run_ui_with_event_loop(
         self,
         #[cfg(target_os = "android")] android_app: Option<android_activity::AndroidApp>,
@@ -120,12 +125,31 @@ impl Pixel1Translator {
                 if should_load {
                     info!(target: "hle::display", "Background loader for {name}");
                     let executor = ApkElfExecutor::new(&path).with_ui(ui_clone.clone());
-                    let candidates =
-                        ["libunity.so", "libminecraftpe.so", "libmain.so", "libgame.so"];
-                    let mut loaded = false;
-                    for eng in candidates {
-                        if let Ok(lib) = executor.bootstrap_engine(eng) {
-                            info!(target: "hle::linker", "Loaded {eng} @ 0x{:x}", lib.guest_base);
+
+                    // Prefer auto-detect (Unity / AIR / main)
+                    let result = executor.bootstrap_any_engine().or_else(|_| {
+                        // Explicit pass over candidates (includes libcom_adobe_air.so)
+                        let mut last_err = None;
+                        for eng in cpu::linker::ENGINE_CANDIDATES {
+                            match executor.bootstrap_engine(eng) {
+                                Ok(lib) => return Ok(lib),
+                                Err(e) => last_err = Some(e),
+                            }
+                        }
+                        Err(last_err.unwrap_or_else(|| {
+                            Pixel1Error::ElfLoad("no engine".into())
+                        }))
+                    });
+
+                    match result {
+                        Ok(lib) => {
+                            info!(
+                                target: "hle::linker",
+                                "Loaded {} @ 0x{:x} (AIR={})",
+                                lib.soname,
+                                lib.guest_base,
+                                lib.is_adobe_air
+                            );
                             cpu_clone.attach_linker(executor);
                             hardware::display::DisplaySurface::set_state(
                                 &ui_clone,
@@ -133,21 +157,20 @@ impl Pixel1Translator {
                                     apk_name: name.clone(),
                                 },
                             );
-                            loaded = true;
-                            break;
                         }
-                    }
-                    if !loaded {
-                        hardware::display::DisplaySurface::update_loading_progress(
-                            &ui_clone,
-                            1.0,
-                            "No native engine – demo mode",
-                        );
-                        std::thread::sleep(std::time::Duration::from_millis(800));
-                        hardware::display::DisplaySurface::set_state(
-                            &ui_clone,
-                            EmulatorState::GameRunning { apk_name: name },
-                        );
+                        Err(e) => {
+                            log::warn!(target: "hle::linker", "Engine load failed: {e}");
+                            hardware::display::DisplaySurface::update_loading_progress(
+                                &ui_clone,
+                                1.0,
+                                &format!("No engine – demo ({e})"),
+                            );
+                            std::thread::sleep(std::time::Duration::from_millis(800));
+                            hardware::display::DisplaySurface::set_state(
+                                &ui_clone,
+                                EmulatorState::GameRunning { apk_name: name },
+                            );
+                        }
                     }
                     break;
                 }
@@ -177,7 +200,6 @@ impl Pixel1Translator {
     }
 }
 
-/// Android NativeActivity entry – **same Rust UI / HLE as Windows**
 #[cfg(target_os = "android")]
 #[no_mangle]
 fn android_main(app: android_activity::AndroidApp) {
