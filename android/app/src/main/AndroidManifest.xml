@@ -15,8 +15,7 @@
         android:roundIcon="@drawable/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.Pixel1HLE"
-        android:requestLegacyExternalStorage="true"
-        android:extractNativeLibs="true">
+        android:requestLegacyExternalStorage="true">
 
         <activity
             android:name=".MainActivity"
