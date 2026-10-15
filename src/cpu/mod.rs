@@ -1,7 +1,14 @@
 //! CPU & Binary Loader + HLE Dynamic Linker
+//!
+//! - `elf_loader`: real PT_LOAD + AArch64 RELA (tested)
+//! - `linker`: APK `.so` extract + map orchestration
+//! - Execution of guest AArch64 on x86_64 requires an `AArch64Backend`
+//!   (Dynarmic/Unicorn-style). Default is `NullAArch64Backend`.
 
+pub mod elf_loader;
 pub mod linker;
 
+pub use elf_loader::{load_elf64_aarch64, AArch64Backend, LoadedImage, NullAArch64Backend};
 pub use linker::{ApkElfExecutor, LoadedLibrary, SymbolResolver, ENGINE_CANDIDATES};
 
 use crate::error::{Pixel1Error, Result};
@@ -51,12 +58,47 @@ impl CpuRuntime {
         }
     }
 
+    /// Load a raw ELF file using the PT_LOAD-aware loader.
+    pub fn load_elf_image(&self, path: &Path) -> Result<LoadedImage> {
+        let data = std::fs::read(path).map_err(|e| Pixel1Error::ElfLoad(e.to_string()))?;
+        let lookup = |_name: &str| -> Option<u64> { None };
+        load_elf64_aarch64(&data, &lookup)
+    }
+
     pub fn load_elf(&self, path: &Path, soname: &str) -> Result<u64> {
         info!("CPU: loading ELF {} as {}", path.display(), soname);
 
+        // Prefer the new PT_LOAD path; fall back to section copy on failure
+        match self.load_elf_image(path) {
+            Ok(img) => {
+                let guest_base = img.min_vaddr;
+                // Leak buffer so host_ptr stays valid for the process lifetime
+                // of this experimental path (same pattern as before).
+                let size = img.image.len();
+                let mut buf = img.image;
+                let host_ptr = buf.as_mut_ptr();
+                std::mem::forget(buf);
+                self.mappings.write().push(GuestMapping {
+                    guest_base,
+                    host_ptr,
+                    size,
+                    prot: 0x7,
+                });
+                self.loaded_libs
+                    .write()
+                    .insert(soname.to_string(), guest_base);
+                Ok(guest_base)
+            }
+            Err(e) => {
+                debug!("PT_LOAD path failed ({e}); legacy section map");
+                self.load_elf_legacy(path, soname)
+            }
+        }
+    }
+
+    fn load_elf_legacy(&self, path: &Path, soname: &str) -> Result<u64> {
         let file = File::open(path).map_err(|e| Pixel1Error::ElfLoad(e.to_string()))?;
         let mmap = unsafe { MmapOptions::new().map(&file)? };
-
         let obj = object::File::parse(&*mmap)
             .map_err(|e| Pixel1Error::ElfLoad(format!("parse: {e}")))?;
 
@@ -89,18 +131,16 @@ impl CpuRuntime {
         let host_ptr = host_buf.as_mut_ptr();
         std::mem::forget(host_buf);
 
-        let mapping = GuestMapping {
+        self.mappings.write().push(GuestMapping {
             guest_base,
             host_ptr,
             size: total_size,
             prot: 0x7,
-        };
-
-        self.mappings.write().push(mapping);
-        self.loaded_libs.write().insert(soname.to_string(), guest_base);
+        });
+        self.loaded_libs
+            .write()
+            .insert(soname.to_string(), guest_base);
         *self.next_guest_base.write() = guest_base + total_size as u64 + 0x10000;
-
-        debug!("CPU: mapped {} @ guest 0x{:x} (size 0x{:x})", soname, guest_base, total_size);
         Ok(guest_base)
     }
 
@@ -143,51 +183,6 @@ impl CpuRuntime {
 
     pub fn attach_linker(&self, executor: ApkElfExecutor) {
         *self.linker.write() = Some(executor);
-    }
-
-    pub fn demo_unity_graphics_bootstrap(&self) {
-        info!(target: "hle::gles", "CPU: simulating Unity/AIR graphics bootstrap cascade");
-
-        unsafe {
-            let display = crate::hardware::gles_bridge::eglGetDisplay(std::ptr::null_mut());
-            let mut major = 0;
-            let mut minor = 0;
-            crate::hardware::gles_bridge::eglInitialize(display, &mut major, &mut minor);
-
-            let mut config: crate::hardware::gles_bridge::EGLConfig = std::ptr::null_mut();
-            let mut num = 0;
-            crate::hardware::gles_bridge::eglChooseConfig(
-                display,
-                std::ptr::null(),
-                &mut config,
-                1,
-                &mut num,
-            );
-
-            let surface = crate::hardware::gles_bridge::eglCreateWindowSurface(
-                display,
-                config,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-            );
-
-            let ctx = crate::hardware::gles_bridge::eglCreateContext(
-                display,
-                config,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-            );
-
-            crate::hardware::gles_bridge::eglMakeCurrent(display, surface, surface, ctx);
-        }
-
-        unsafe {
-            crate::hardware::gles_bridge::glViewport(0, 0, 1080, 1920);
-            crate::hardware::gles_bridge::glClearColor(0.1, 0.2, 0.3, 1.0);
-            crate::hardware::gles_bridge::glClear(0x00004000 | 0x00000100);
-        }
-
-        info!(target: "hle::gles", "CPU: graphics bootstrap cascade completed – no faults");
     }
 }
 
