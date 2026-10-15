@@ -1,4 +1,4 @@
-//! State-driven GUI – compact HyperHLE shell
+//! Compact HyperHLE-style UI shell
 
 mod app_picker;
 mod boot_animation;
@@ -6,7 +6,7 @@ mod file_explorer;
 mod loading_screen;
 mod terminal;
 
-pub use app_picker::AppPicker;
+pub use app_picker::{AppInfo, AppPicker};
 pub use boot_animation::BootAnimation;
 pub use file_explorer::FileExplorer;
 pub use loading_screen::LoadingScreen;
@@ -29,14 +29,6 @@ impl Default for EmulatorState {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct EmulatorSettings {
-    pub target_api: i32,
-    pub log_level: LogFilterLevel,
-    pub active_engine: String,
-    pub show_settings: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFilterLevel {
     Error,
@@ -45,12 +37,24 @@ pub enum LogFilterLevel {
     Debug,
 }
 
+#[derive(Debug, Clone)]
+pub struct EmulatorSettings {
+    /// Android API level target (16 = 4.1 … 25 = 7.1)
+    pub target_api: i32,
+    pub log_level: LogFilterLevel,
+    pub active_engine: String,
+    /// GLES thread-guard optimizer (serializes GL calls)
+    pub gles_thread_guard: bool,
+    pub show_settings: bool,
+}
+
 impl Default for EmulatorSettings {
     fn default() -> Self {
         Self {
             target_api: 25,
             log_level: LogFilterLevel::Info,
             active_engine: "auto".into(),
+            gles_thread_guard: true,
             show_settings: false,
         }
     }
@@ -68,6 +72,9 @@ pub struct UiSharedState {
     pub explorer: FileExplorer,
     pub show_explorer: bool,
     pub settings: EmulatorSettings,
+    /// Android SAF: watch apps/ for a newly imported package
+    pub pending_saf: bool,
+    pub saf_started_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +97,8 @@ impl Default for UiSharedState {
             explorer: FileExplorer::default(),
             show_explorer: true,
             settings: EmulatorSettings::default(),
+            pending_saf: false,
+            saf_started_ms: 0,
         }
     }
 }

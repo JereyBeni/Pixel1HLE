@@ -6,6 +6,7 @@ pub mod cpu;
 pub mod error;
 pub mod hardware;
 pub mod logging;
+pub mod platform;
 pub mod profile_embed;
 pub mod syscall;
 pub mod ui;
@@ -45,6 +46,7 @@ pub struct Pixel1Translator {
 impl Pixel1Translator {
     pub fn new(profile_path: &str) -> Result<Self> {
         info!(target: "hle", "Pixel1Translator: booting sailfish HLE + UI");
+        let _ = platform::ensure_sandbox_dirs();
         let profile_str = std::fs::read_to_string(profile_path).unwrap_or_else(|_| {
             info!(target: "hle", "Profile file missing – using embedded sailfish defaults");
             profile_embed::SAILFISH_YAML.to_string()
@@ -53,6 +55,7 @@ impl Pixel1Translator {
     }
 
     pub fn from_yaml(profile_str: &str) -> Result<Self> {
+        let _ = platform::ensure_sandbox_dirs();
         let root: RootConfig = serde_yaml::from_str(profile_str)
             .map_err(|e| Pixel1Error::Config(e.to_string()))?;
 
@@ -126,9 +129,7 @@ impl Pixel1Translator {
                     info!(target: "hle::display", "Background loader for {name}");
                     let executor = ApkElfExecutor::new(&path).with_ui(ui_clone.clone());
 
-                    // Prefer auto-detect (Unity / AIR / main)
                     let result = executor.bootstrap_any_engine().or_else(|_| {
-                        // Explicit pass over candidates (includes libcom_adobe_air.so)
                         let mut last_err = None;
                         for eng in cpu::linker::ENGINE_CANDIDATES {
                             match executor.bootstrap_engine(eng) {
@@ -136,9 +137,7 @@ impl Pixel1Translator {
                                 Err(e) => last_err = Some(e),
                             }
                         }
-                        Err(last_err.unwrap_or_else(|| {
-                            Pixel1Error::ElfLoad("no engine".into())
-                        }))
+                        Err(last_err.unwrap_or_else(|| Pixel1Error::ElfLoad("no engine".into())))
                     });
 
                     match result {
@@ -210,6 +209,7 @@ fn android_main(app: android_activity::AndroidApp) {
     );
 
     log::info!(target: "hle", "android_main – pure Rust NativeActivity");
+    let _ = platform::ensure_sandbox_dirs();
 
     match Pixel1Translator::from_yaml(profile_embed::SAILFISH_YAML) {
         Ok(rt) => {
