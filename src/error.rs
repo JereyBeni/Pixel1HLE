@@ -37,6 +37,12 @@ pub enum Pixel1Error {
 
     #[error("Storage router error: {0}")]
     Storage(String),
+
+    #[error("Import / file picker error: {0}")]
+    Import(String),
+
+    #[error("Android SAF / storage permission error: {0}")]
+    Saf(String),
 }
 
 pub type Result<T> = std::result::Result<T, Pixel1Error>;
