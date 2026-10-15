@@ -44,10 +44,8 @@ pub struct AppPicker;
 
 impl AppPicker {
     pub fn ui(ctx: &egui::Context, shared: &SharedUi) {
-        // Poll SAF import completion on Android
         poll_saf_if_pending(shared);
 
-        // ── Status bar (tight) ───────────────────────────────────────────
         egui::TopBottomPanel::top("hle_status")
             .exact_height(22.0)
             .frame(
@@ -81,7 +79,6 @@ impl AppPicker {
                 });
             });
 
-        // ── QS action bar: Import ya! + gear ─────────────────────────────
         egui::TopBottomPanel::top("hle_qs")
             .exact_height(46.0)
             .frame(
@@ -93,7 +90,6 @@ impl AppPicker {
                 draw_qs_bar(ui, shared);
             });
 
-        // Settings drawer
         if shared.lock().settings.show_settings {
             egui::SidePanel::right("hle_settings")
                 .exact_width(200.0)
@@ -101,7 +97,7 @@ impl AppPicker {
                     egui::Frame::none()
                         .fill(Color32::from_rgb(20, 24, 32))
                         .inner_margin(8.0)
-                        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(40, 50, 62))),
+                        .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(40, 50, 62))),
                 )
                 .show(ctx, |ui| {
                     draw_settings_drawer(ui, shared);
@@ -123,7 +119,6 @@ impl AppPicker {
                 );
             });
 
-        // ── Body: library + explorer (stacked, compact) ──────────────────
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::none()
@@ -233,8 +228,6 @@ impl AppPicker {
     }
 }
 
-// ─── Quick Settings tile bar ────────────────────────────────────────────────
-
 fn draw_qs_bar(ui: &mut egui::Ui, shared: &SharedUi) {
     let bar_h = 34.0_f32;
     let avail = ui.available_width();
@@ -242,7 +235,6 @@ fn draw_qs_bar(ui: &mut egui::Ui, shared: &SharedUi) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
 
-        // Import ya! QS tile
         let tile_w = (avail - 42.0).max(100.0);
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(tile_w, bar_h), Sense::click());
         let fill = if resp.hovered() {
@@ -286,7 +278,6 @@ fn draw_qs_bar(ui: &mut egui::Ui, shared: &SharedUi) {
             trigger_import(shared);
         }
 
-        // Gear
         let (grect, gresp) = ui.allocate_exact_size(Vec2::splat(bar_h), Sense::click());
         let open = shared.lock().settings.show_settings;
         let gfill = if gresp.hovered() || open {
@@ -429,7 +420,11 @@ fn draw_settings_drawer(ui: &mut egui::Ui, shared: &SharedUi) {
     {
         let mut g = shared.lock();
         let on = g.settings.gles_thread_guard;
-        let label = if on { "ON – serialized GL" } else { "OFF – free thread" };
+        let label = if on {
+            "ON – serialized GL"
+        } else {
+            "OFF – free thread"
+        };
         if ui
             .add(
                 egui::Button::new(RichText::new(label).size(10.0).color(Color32::WHITE))
@@ -459,8 +454,6 @@ fn draw_settings_drawer(ui: &mut egui::Ui, shared: &SharedUi) {
             .color(Color32::from_rgb(85, 95, 110)),
     );
 }
-
-// ─── Import plumbing ────────────────────────────────────────────────────────
 
 fn trigger_import(shared: &SharedUi) {
     let _ = platform::ensure_sandbox_dirs();
@@ -508,7 +501,6 @@ fn trigger_import(shared: &SharedUi) {
             }
             Err(e) => {
                 warn!(target: "hle::saf", "{e}");
-                // Fallback: rescan known public dirs into library
                 sync_library(shared);
             }
         }
@@ -526,7 +518,6 @@ fn poll_saf_if_pending(shared: &SharedUi) {
         if now_ms().saturating_sub(started) < 500 {
             return;
         }
-        // Look for newest apk in apps/
         if let Some(app) = newest_app_in_sandbox() {
             let mut g = shared.lock();
             g.pending_saf = false;
@@ -546,8 +537,7 @@ fn import_and_register(shared: &SharedUi, src: &Path) -> Result<(String, String)
 
     #[cfg(target_os = "android")]
     let dest = {
-        platform::android_saf::import_apk_to_sandbox(src)
-            .map_err(|e| e.to_string())?
+        platform::android_saf::import_apk_to_sandbox(src).map_err(|e| e.to_string())?
     };
     #[cfg(not(target_os = "android"))]
     let dest = {
@@ -593,7 +583,7 @@ fn launch_apk(shared: &SharedUi, path: &str, name: &str) {
 
 fn enumerate_apps() -> Vec<AppInfo> {
     let _ = platform::ensure_sandbox_dirs();
-    let mut apps = Vec::new();
+    let mut apps: Vec<AppInfo> = Vec::new();
     let mut roots = vec![platform::apps_dir()];
     #[cfg(target_os = "android")]
     {
@@ -604,7 +594,7 @@ fn enumerate_apps() -> Vec<AppInfo> {
         if let Ok(rd) = std::fs::read_dir(&dir) {
             for e in rd.flatten() {
                 if let Some(info) = AppInfo::from_path(&e.path()) {
-                    if !apps.iter().any(|a| a.path == info.path) {
+                    if !apps.iter().any(|a: &AppInfo| a.path == info.path) {
                         apps.push(info);
                     }
                 }
