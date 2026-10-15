@@ -1,18 +1,19 @@
 //! State-driven GUI for Pixel1HLE
-//! AppPicker → BootAnimation → ApkLoading → GameRunning
+//! AppPicker → BootAnimation → ApkLoading → GameRunning + Terminal
 
 mod app_picker;
 mod boot_animation;
 mod loading_screen;
+mod terminal;
 
 pub use app_picker::AppPicker;
 pub use boot_animation::BootAnimation;
 pub use loading_screen::LoadingScreen;
+pub use terminal::TerminalPanel;
 
 use parking_lot::Mutex;
 use std::sync::Arc;
 
-/// Global emulator lifecycle state
 #[derive(Debug, Clone, PartialEq)]
 pub enum EmulatorState {
     AppPicker,
@@ -27,14 +28,15 @@ impl Default for EmulatorState {
     }
 }
 
-/// Shared state that the linker and the UI both touch
 #[derive(Debug)]
 pub struct UiSharedState {
     pub state: EmulatorState,
-    pub loading_progress: f32,       // 0.0 ..= 1.0
+    pub loading_progress: f32,
     pub loading_status: String,
     pub available_apks: Vec<ApkEntry>,
     pub selected_apk: Option<String>,
+    /// Terminal panel visible
+    pub terminal_open: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -52,13 +54,13 @@ impl Default for UiSharedState {
             loading_status: String::new(),
             available_apks: Vec::new(),
             selected_apk: None,
+            terminal_open: true, // open by default so user sees logs
         }
     }
 }
 
 pub type SharedUi = Arc<Mutex<UiSharedState>>;
 
-/// Create the shared UI state (called once at boot)
 pub fn create_shared_ui() -> SharedUi {
     Arc::new(Mutex::new(UiSharedState::default()))
 }

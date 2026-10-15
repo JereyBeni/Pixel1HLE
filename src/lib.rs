@@ -1,9 +1,10 @@
-//! pixel1-translator – Full HLE with UI state machine
+//! pixel1-translator – Full HLE with UI state machine + terminal
 
 pub mod binder;
 pub mod cpu;
 pub mod error;
 pub mod hardware;
+pub mod logging;
 pub mod syscall;
 pub mod ui;
 
@@ -27,7 +28,7 @@ pub struct Pixel1Translator {
 
 impl Pixel1Translator {
     pub fn new(profile_path: &str) -> Result<Self> {
-        info!("Pixel1Translator: booting sailfish HLE + UI state machine");
+        info!(target: "hle", "Pixel1Translator: booting sailfish HLE + UI");
 
         let profile_str = std::fs::read_to_string(profile_path)
             .map_err(|e| Pixel1Error::Config(e.to_string()))?;
@@ -52,7 +53,12 @@ impl Pixel1Translator {
 
         let binder = Arc::new(BinderRuntime::new(hw.clone(), allowlist));
 
-        Ok(Self { cpu, binder, syscall, hw })
+        Ok(Self {
+            cpu,
+            binder,
+            syscall,
+            hw,
+        })
     }
 
     pub fn run_ui(self) -> Result<()> {
@@ -91,7 +97,9 @@ impl Pixel1Translator {
                                 cpu_clone.attach_linker(executor);
                                 hardware::display::DisplaySurface::set_state(
                                     &ui_clone,
-                                    EmulatorState::GameRunning { apk_name: name.clone() },
+                                    EmulatorState::GameRunning {
+                                        apk_name: name.clone(),
+                                    },
                                 );
                                 loaded = true;
                                 break;
@@ -103,7 +111,9 @@ impl Pixel1Translator {
                     }
                     if !loaded {
                         hardware::display::DisplaySurface::update_loading_progress(
-                            &ui_clone, 1.0, "No native engine found – demo mode",
+                            &ui_clone,
+                            1.0,
+                            "No native engine found – demo mode",
                         );
                         std::thread::sleep(std::time::Duration::from_millis(800));
                         hardware::display::DisplaySurface::set_state(
@@ -116,10 +126,17 @@ impl Pixel1Translator {
             }
         });
 
+        // Pass log state into the UI loop via a side channel file path;
+        // the terminal reads from the global logger ring through logging::snapshot.
+        // We store a handle on the UI shared state indirectly via static once the logger is init.
         hardware::display::run_ui_loop(ui_shared, width, height)
     }
 
-    pub fn load_and_run_apk(&self, apk_path: &Path, engine_soname: &str) -> Result<Arc<LoadedLibrary>> {
+    pub fn load_and_run_apk(
+        &self,
+        apk_path: &Path,
+        engine_soname: &str,
+    ) -> Result<Arc<LoadedLibrary>> {
         let executor = ApkElfExecutor::new(apk_path).with_ui(self.hw.ui_shared.clone());
         let lib = executor.bootstrap_engine(engine_soname)?;
         self.cpu.attach_linker(executor);
